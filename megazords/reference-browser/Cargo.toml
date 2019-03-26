@@ -13,3 +13,6 @@ logins_ffi = { path = "../../components/logins/ffi" }
 places-ffi = { path = "../../components/places/ffi" }
 push-ffi = { path = "../../components/push/ffi" }
 rc_log_ffi = { path = "../../components/rc_log" }
+
+[features]
+use_geckoview_nss = ["fxaclient_ffi/use_geckoview_nss"]

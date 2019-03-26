@@ -135,6 +135,9 @@ pub enum ErrorKind {
         info: String,
     },
 
+    #[fail(display = "Alice/NSS error: {}", _0)]
+    AliceError(#[fail(cause)] alice::Error),
+
     // Basically reimplement error_chain's foreign_links. (Ugh, this sucks)
     #[fail(display = "Hex decode error: {}", _0)]
     HexDecodeError(#[fail(cause)] hex::FromHexError),
@@ -191,6 +194,7 @@ macro_rules! impl_from_error {
 }
 
 impl_from_error! {
+    (AliceError, ::alice::Error),
     (HexDecodeError, ::hex::FromHexError),
     (Base64Decode, ::base64::DecodeError),
     (JsonError, ::serde_json::Error),

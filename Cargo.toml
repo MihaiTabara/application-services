@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "components/alice",
     "components/fxa-client",
     "components/fxa-client/ffi",
     "components/logins",

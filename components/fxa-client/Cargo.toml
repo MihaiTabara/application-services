@@ -25,6 +25,7 @@ serde_json = "1.0.28"
 untrusted = "0.6.2"
 url = "1.7.1"
 ffi-support = { path = "../support/ffi" }
+alice = { path = "../alice" }
 
 [dev-dependencies]
 cli-support = { path = "../support/cli" }
@@ -34,4 +35,5 @@ prost-build = "0.4"
 
 [features]
 browserid = ["openssl", "hawk"]
+use_geckoview_nss = ["alice/use_geckoview_nss"]
 default = []

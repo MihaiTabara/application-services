@@ -2,9 +2,6 @@
 
 set -euvx
 
-abspath () { case "$1" in /*)printf "%s\\n" "$1";; *)printf "%s\\n" "$PWD/$1";; esac; }
-export -f abspath
-
 # Our short-names for the architectures.
 TARGET_ARCHS=("x86_64" "x86" "arm64" "arm")
 # The directories required for the Android-Gradle plugin and APK

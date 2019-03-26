@@ -18,6 +18,7 @@ path = "../"
 
 [features]
 browserid = ["fxa-client/browserid"]
+use_geckoview_nss = ["fxa-client/use_geckoview_nss"]
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.7.0"

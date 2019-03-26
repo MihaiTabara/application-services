@@ -79,6 +79,10 @@ cargo {
     profile = "release"
 
     exec = rootProject.ext.cargoExec
+
+    features {
+        defaultAnd("use_geckoview_nss")
+    }
 }
 
 dependencies {

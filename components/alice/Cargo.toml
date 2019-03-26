@@ -1,0 +1,16 @@
+[package]
+name = "alice"
+version = "0.1.0"
+authors = ["Edouard Oger <eoger@fastmail.com>"]
+edition = "2018"
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[features]
+use_geckoview_nss = ["nss-sys/use_geckoview_nss"]
+
+[dependencies]
+failure = "0.1.5"
+failure_derive = "0.1.5"
+nss-sys = { path = "nss-sys" }
