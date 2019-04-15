@@ -62,7 +62,7 @@ def android_libs():
         .with_artifacts(
             "/build/repo/target.tar.gz",
         )
-        .find_or_create("build-libs.android." + CONFIG.git_sha_for_directory("libs"))
+        .find_or_create("build.libs.android." + CONFIG.git_sha_for_directory("libs"))
     )
 
 def desktop_linux_libs():
@@ -77,7 +77,7 @@ def desktop_linux_libs():
         .with_artifacts(
             "/build/repo/target.tar.gz",
         )
-        .find_or_create("build-libs.desktop.linux." + CONFIG.git_sha_for_directory("libs"))
+        .find_or_create("build.libs.desktop.linux." + CONFIG.git_sha_for_directory("libs"))
     )
 
 def desktop_macos_libs():
@@ -92,7 +92,7 @@ def desktop_macos_libs():
         .with_artifacts(
             "/build/repo/target.tar.gz",
         )
-        .find_or_create("build-libs.desktop.macos." + CONFIG.git_sha_for_directory("libs"))
+        .find_or_create("build.libs.desktop.macos." + CONFIG.git_sha_for_directory("libs"))
     )
 
 def desktop_win32_x86_64_libs():
@@ -108,7 +108,7 @@ def desktop_win32_x86_64_libs():
         .with_artifacts(
             "/build/repo/target.tar.gz",
         )
-        .find_or_create("build-libs.desktop.win32-x86-64." + CONFIG.git_sha_for_directory("libs"))
+        .find_or_create("build.libs.desktop.win32-x86-64." + CONFIG.git_sha_for_directory("libs"))
     )
 
 def android_task(task_name, libs_tasks):
