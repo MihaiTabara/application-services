@@ -210,7 +210,7 @@ class Task:
         if any(r.startswith("index.") for r in routes):
             self.extra.setdefault("index", {})["expires"] = \
                 SHARED.from_now_json(self.index_and_artifacts_expire_in)
-        if self.features.get('chainOfTrust'):
+        if self.features and self.features.get('chainOfTrust'):
             image = self.docker_image
             if image and isinstance(image, dict):
                 cot = self.extra.setdefault("chainOfTrust", {})
