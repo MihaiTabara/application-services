@@ -240,7 +240,6 @@ class Task:
 
         <https://docs.taskcluster.net/docs/reference/core/taskcluster-index/references/api#findTask>
         """
-        # task_id = self.create()
         if not index_path:
             worker_type = self.worker_type
             index_by = json.dumps([worker_type, self.build_worker_payload()]).encode("utf-8")
@@ -428,9 +427,9 @@ class DockerWorkerTask(Task):
                 "servobrowser/taskcluster-bootstrap:image-builder@sha256:" \
                 "0a7d012ce444d62ffb9e7f06f0c52fedc24b68c2060711b313263367f7272d9d"
             )
-            # .find_or_create("appservices-docker-image." + digest)
             .find_or_create("appservices-docker-image." + digest)
         )
+
         return self \
         .with_dependencies(image_build_task) \
         .with_docker_image({
