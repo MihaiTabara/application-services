@@ -214,9 +214,7 @@ class Task:
             image = self.docker_image
             if image and isinstance(image, dict):
                 cot = self.extra.setdefault("chainOfTrust", {})
-                cot.setdefault('inputs', {})['docker-image'] = {
-                    'task-reference': '<docker-image>'
-                }
+                cot.setdefault('inputs', {})['docker-image'] = image['taskId']
 
         dict_update_if_truthy(
             queue_payload,
