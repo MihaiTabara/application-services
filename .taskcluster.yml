@@ -106,7 +106,7 @@ tasks:
               git reset --hard ${head_rev} &&
               python3 automation/taskcluster/decision_task.py
           env:
-            APPSERVICES_HEAD_REPOSITORY: ${clone_url}
+            APPSERVICES_HEAD_REPOSITORY: ${repository}
             APPSERVICES_HEAD_BRANCH: ${head_branch}
             APPSERVICES_HEAD_REV: ${head_rev}
             TASK_FOR: ${tasks_for}
