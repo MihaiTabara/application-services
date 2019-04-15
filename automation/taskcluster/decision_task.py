@@ -163,7 +163,8 @@ def gradle_module_task(libs_tasks, module_info, is_release):
     return task.create()
 
 def build_gradle_modules_tasks(is_release):
-    libs_tasks = libs_for("android", "desktop_linux", "desktop_macos", "desktop_win32_x86_64")
+    # libs_tasks = libs_for("android", "desktop_linux", "desktop_macos", "desktop_win32_x86_64")
+    libs_tasks = libs_for("desktop_linux")
     module_build_tasks = {}
     for module_info in module_definitions():
         module_build_tasks[module_info['name']] = gradle_module_task(libs_tasks, module_info, is_release)
