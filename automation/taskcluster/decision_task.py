@@ -56,6 +56,9 @@ def android_libs():
             popd
             tar -czf /build/repo/target.tar.gz libs/android
         """)
+        .with_script("""
+            echo "rust.targets=linux-x86-64" > local.properties
+        """)
         .with_artifacts(
             "/build/repo/target.tar.gz",
         )
