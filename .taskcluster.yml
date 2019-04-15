@@ -40,11 +40,6 @@ tasks:
       $if: 'tasks_for == "github-pull-request"'
       then: ${event.pull_request.head.repo.html_url}
       else: ${event.repository.html_url}
-
-    clone_url:
-      $if: 'tasks_for == "github-pull-request"'
-      then: ${event.pull_request.head.repo.clone_url}
-      else: ${event.repository.clone_url}
   in:
     $let:
       default_task_definition:
@@ -102,7 +97,7 @@ tasks:
               python3 -m pip install pyyaml &&
               git init repo &&
               cd repo &&
-              git fetch --tags ${clone_url} ${head_branch} &&
+              git fetch --tags ${repository} ${head_branch} &&
               git reset --hard ${head_rev} &&
               python3 automation/taskcluster/decision_task.py
           env:
