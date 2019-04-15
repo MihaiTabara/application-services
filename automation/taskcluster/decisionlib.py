@@ -210,13 +210,6 @@ class Task:
         if any(r.startswith("index.") for r in routes):
             self.extra.setdefault("index", {})["expires"] = \
                 SHARED.from_now_json(self.index_and_artifacts_expire_in)
-        if self.features.get('chainOfTrust'):
-            image = self.docker_image
-            if image and isinstance(image, dict):
-                cot = self.extra.setdefault("chainOfTrust", {})
-                cot.setdefault('inputs', {})['docker-image'] = {
-                    'task-reference': '<docker-image>'
-                }
 
         dict_update_if_truthy(
             queue_payload,
@@ -242,7 +235,6 @@ class Task:
 
         <https://docs.taskcluster.net/docs/reference/core/taskcluster-index/references/api#findTask>
         """
-        # task_id = self.create()
         if not index_path:
             worker_type = self.worker_type
             index_by = json.dumps([worker_type, self.build_worker_payload()]).encode("utf-8")
@@ -430,7 +422,6 @@ class DockerWorkerTask(Task):
                 "servobrowser/taskcluster-bootstrap:image-builder@sha256:" \
                 "0a7d012ce444d62ffb9e7f06f0c52fedc24b68c2060711b313263367f7272d9d"
             )
-            # .find_or_create("appservices-docker-image." + digest)
             .find_or_create("appservices-docker-image." + digest)
         )
         return self \
@@ -440,6 +431,16 @@ class DockerWorkerTask(Task):
             "path": "public/image.tar.lz4",
             "taskId": image_build_task,
         })
+
+    def with_extra_CoT(self):
+        if self.features.get('chainOfTrust'):
+            image = self.docker_image
+            if image and isinstance(image, dict):
+                cot = self.extra.setdefault("chainOfTrust", {})
+                cot.setdefault('inputs', {})['docker-image'] = {
+                    'task-reference': '<docker-image>'
+                }
+        return self
 
 
 def expand_dockerfile(dockerfile):

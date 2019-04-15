@@ -74,6 +74,7 @@ def desktop_linux_libs():
         .with_artifacts(
             "/build/repo/target.tar.gz",
         )
+        .with_extra_CoT()
         .find_or_create("build-libs.desktop.linux." + CONFIG.git_sha_for_directory("libs"))
     )
 
