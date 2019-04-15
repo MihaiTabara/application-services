@@ -53,9 +53,9 @@ class Config:
         # Set in the decision task’s payload, such as defined in .taskcluster.yml
         self.task_owner = os.environ.get("TASK_OWNER")
         self.task_source = os.environ.get("TASK_SOURCE")
-        self.git_url = os.environ.get("GIT_URL")
-        self.git_ref = os.environ.get("GIT_REF")
-        self.git_sha = os.environ.get("GIT_SHA")
+        self.git_url = os.environ.get("APPSERVICES_HEAD_REPOSITORY")
+        self.git_ref = os.environ.get("APPSERVICES_HEAD_BRANCH")
+        self.git_sha = os.environ.get("APPSERVICES_HEAD_REV")
 
         # Map directory string to git sha for that directory.
         self._git_sha_for_directory = {}
@@ -379,8 +379,8 @@ class DockerWorkerTask(Task):
         .with_env(**git_env()) \
         .with_early_script("""
             cd repo
-            git fetch --quiet --tags "$GIT_URL" "$GIT_REF"
-            git reset --hard "$GIT_SHA"
+            git fetch --quiet --tags "$APPSERVICES_HEAD_REPOSITORY" "$APPSERVICES_HEAD_BRANCH"
+            git reset --hard "$APPSERVICES_HEAD_REV"
         """)
 
     def with_dockerfile(self, dockerfile):
@@ -456,9 +456,9 @@ def git_env():
     assert CONFIG.git_ref
     assert CONFIG.git_sha
     return {
-        "GIT_URL": CONFIG.git_url,
-        "GIT_REF": CONFIG.git_ref,
-        "GIT_SHA": CONFIG.git_sha,
+        "APPSERVICES_HEAD_REPOSITORY": CONFIG.git_url,
+        "APPSERVICES_HEAD_BRANCH": CONFIG.git_ref,
+        "APPSERVICES_HEAD_REV": CONFIG.git_sha,
     }
 
 def dict_update_if_truthy(d, **kwargs):
