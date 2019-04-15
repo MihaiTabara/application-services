@@ -8,7 +8,7 @@ OPENSSL_SHA256="fc20130f8b7cbd2fb918b2f14e2f429e109c31ddd0fb38fc5d71d9ffed3f9f41
 SQLCIPHER_VERSION="4.0.0"
 SQLCIPHER_SHA256="c8f5fc6d800aae6107bf23900144804db5510c2676c93fbb269e4a0700837d68"
 
-# End of configuration.
+# End of configuration
 
 if [ "$#" -ne 1 ]
 then
