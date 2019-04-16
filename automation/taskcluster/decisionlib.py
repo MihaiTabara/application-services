@@ -278,7 +278,6 @@ class BeetmoverTask(Task):
 
     def build_worker_payload(self):
         return {
-            "features": "chainOfTrust",
             "maxRunTime": 10 * 60,
             "releaseProperties": {
                 "appName": self.app_name,
