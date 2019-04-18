@@ -3,6 +3,10 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #![allow(unknown_lints)]
+#![warn(rust_2018_idioms)]
+// Let's allow these in the FFI code, since it's usually just a coincidence if
+// the closure is small.
+#![allow(clippy::redundant_closure)]
 
 use ffi_support::{
     define_box_destructor, define_bytebuffer_destructor, define_handle_map_deleter,
@@ -11,8 +15,9 @@ use ffi_support::{
 use places::error::*;
 use places::msg_types::BookmarkNodeList;
 use places::storage::bookmarks;
-use places::types::SyncGuid;
-use places::{db::PlacesInterruptHandle, storage, ConnectionType, PlacesApi, PlacesDb};
+use places::types::{SyncGuid, VisitTransitionSet};
+use places::{storage, ConnectionType, PlacesApi, PlacesDb};
+use sql_support::SqlInterruptHandle;
 use std::os::raw::c_char;
 use std::sync::Arc;
 
@@ -109,12 +114,12 @@ pub extern "C" fn places_api_return_write_conn(
 pub extern "C" fn places_new_interrupt_handle(
     handle: u64,
     error: &mut ExternError,
-) -> *mut PlacesInterruptHandle {
+) -> *mut SqlInterruptHandle {
     CONNECTIONS.call_with_output(error, handle, |conn| conn.new_interrupt_handle())
 }
 
 #[no_mangle]
-pub extern "C" fn places_interrupt(handle: &PlacesInterruptHandle, error: &mut ExternError) {
+pub extern "C" fn places_interrupt(handle: &SqlInterruptHandle, error: &mut ExternError) {
     ffi_support::call_with_output(error, || handle.interrupt())
 }
 
@@ -303,6 +308,7 @@ pub extern "C" fn places_get_visit_infos(
     handle: u64,
     start_date: i64,
     end_date: i64,
+    exclude_types: i32,
     error: &mut ExternError,
 ) -> ByteBuffer {
     log::debug!("places_get_visit_infos");
@@ -311,7 +317,49 @@ pub extern "C" fn places_get_visit_infos(
             conn,
             places::Timestamp(start_date.max(0) as u64),
             places::Timestamp(end_date.max(0) as u64),
+            VisitTransitionSet::from_u16(exclude_types as u16)
+                .expect("Bug: Invalid VisitTransitionSet"),
         )?)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn places_get_visit_count(
+    handle: u64,
+    exclude_types: i32,
+    error: &mut ExternError,
+) -> i64 {
+    log::debug!("places_get_visit_count");
+    CONNECTIONS.call_with_result(error, handle, |conn| -> places::Result<_> {
+        storage::history::get_visit_count(
+            conn,
+            // Note: it's a bug in our FFI android (or swift, eventually) code
+            // if this expect fires.
+            VisitTransitionSet::from_u16(exclude_types as u16)
+                .expect("Bug: Invalid VisitTransitionSet"),
+        )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn places_get_visit_page(
+    handle: u64,
+    offset: i64,
+    count: i64,
+    exclude_types: i32,
+    error: &mut ExternError,
+) -> ByteBuffer {
+    log::debug!("places_get_visit_page");
+    CONNECTIONS.call_with_result(error, handle, |conn| -> places::Result<_> {
+        storage::history::get_visit_page(
+            conn,
+            offset,
+            count,
+            // Note: it's a bug in our FFI android (or swift, eventually) code
+            // if this expect fires.
+            VisitTransitionSet::from_u16(exclude_types as u16)
+                .expect("Bug: Invalid VisitTransitionSet"),
+        )
     })
 }
 
@@ -327,7 +375,31 @@ pub extern "C" fn sync15_history_sync(
     log::debug!("sync15_history_sync");
     APIS.call_with_result(error, handle, |api| -> places::Result<_> {
         // Note that api.sync returns a SyncPing which we drop on the floor.
-        api.sync(
+        api.sync_history(
+            &sync15::Sync15StorageClientInit {
+                key_id: key_id.into_string(),
+                access_token: access_token.into_string(),
+                tokenserver_url: parse_url(tokenserver_url.as_str())?,
+            },
+            &sync15::KeyBundle::from_ksync_base64(sync_key.as_str())?,
+        )?;
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sync15_bookmarks_sync(
+    handle: u64,
+    key_id: FfiStr<'_>,
+    access_token: FfiStr<'_>,
+    sync_key: FfiStr<'_>,
+    tokenserver_url: FfiStr<'_>,
+    error: &mut ExternError,
+) {
+    log::debug!("sync15_bookmarks_sync");
+    APIS.call_with_result(error, handle, |api| -> places::Result<_> {
+        // Note that api.sync returns a SyncPing which we drop on the floor.
+        api.sync_bookmarks(
             &sync15::Sync15StorageClientInit {
                 key_id: key_id.into_string(),
                 access_token: access_token.into_string(),
@@ -460,4 +532,4 @@ define_bytebuffer_destructor!(places_destroy_bytebuffer);
 define_handle_map_deleter!(APIS, places_api_destroy);
 
 define_handle_map_deleter!(CONNECTIONS, places_connection_destroy);
-define_box_destructor!(PlacesInterruptHandle, places_interrupt_handle_destroy);
+define_box_destructor!(SqlInterruptHandle, places_interrupt_handle_destroy);

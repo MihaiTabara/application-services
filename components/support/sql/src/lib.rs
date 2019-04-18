@@ -3,15 +3,18 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #![allow(unknown_lints)]
+#![warn(rust_2018_idioms)]
 
 mod conn_ext;
 mod each_chunk;
+mod interrupt;
 mod maybe_cached;
 mod query_plan;
 mod repeat;
 
 pub use crate::conn_ext::*;
 pub use crate::each_chunk::*;
+pub use crate::interrupt::*;
 pub use crate::maybe_cached::*;
 pub use crate::query_plan::*;
 pub use crate::repeat::*;

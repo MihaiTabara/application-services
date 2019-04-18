@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #![allow(unknown_lints)]
+#![warn(rust_2018_idioms)]
 
 use cli_support::fxa_creds::{get_cli_fxa, get_default_fxa_config};
 use places::bookmark_sync::store::BookmarksStore;
@@ -16,12 +17,13 @@ use places::{ConnectionType, PlacesApi, PlacesDb};
 
 use failure::Fail;
 use serde_derive::*;
-use sql_support::ConnExt;
-use std::cell::Cell;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use structopt::StructOpt;
-use sync15::{sync_multiple, telemetry, Store};
+use sync15::{
+    sync_multiple, telemetry, MemoryCachedState, SetupStorageClient, Store, StoreSyncAssociation,
+    Sync15StorageClient,
+};
 use url::Url;
 
 type Result<T> = std::result::Result<T, failure::Error>;
@@ -161,20 +163,38 @@ fn sync(
     api: &PlacesApi,
     mut engine_names: Vec<String>,
     cred_file: String,
+    wipe_all: bool,
     wipe: bool,
     reset: bool,
 ) -> Result<()> {
-    let conn = api.open_connection(ConnectionType::Sync)?;
+    let conn = api.open_sync_connection()?;
+
+    // interrupts are per-connection, so we need to set that up here.
+    let interrupt_handle = conn.new_interrupt_handle();
+
+    ctrlc::set_handler(move || {
+        println!("received Ctrl+C!");
+        interrupt_handle.interrupt();
+    })
+    .expect("Error setting Ctrl-C handler");
+    let interruptee = conn.begin_interrupt_scope();
+
     let cli_fxa = get_cli_fxa(get_default_fxa_config(), &cred_file)?;
 
+    if wipe_all {
+        Sync15StorageClient::new(cli_fxa.client_init.clone())?.wipe_all_remote()?;
+    }
     // phew - working with traits is making markh's brain melt!
     // Note also that PlacesApi::sync() exists and ultimately we should
     // probably end up using that, but it's not yet ready to handle bookmarks.
-    let client_info = Cell::new(None);
+    // And until we move to PlacesApi::sync() we simply do not persist any
+    // global state at all (however, we do reuse the in-memory state).
+    let mut mem_cached_state = MemoryCachedState::default();
+    let mut global_state: Option<String> = None;
     let stores: Vec<Box<dyn Store>> = if engine_names.is_empty() {
         vec![
-            Box::new(BookmarksStore::new(&conn, &client_info)),
-            Box::new(HistoryStore::new(&conn, &client_info)),
+            Box::new(BookmarksStore::new(&conn, &interruptee)),
+            Box::new(HistoryStore::new(&conn, &interruptee)),
         ]
     } else {
         engine_names.sort();
@@ -183,8 +203,8 @@ fn sync(
             .into_iter()
             .map(|name| -> Box<dyn Store> {
                 match name.as_str() {
-                    "bookmarks" => Box::new(BookmarksStore::new(&conn, &client_info)),
-                    "history" => Box::new(HistoryStore::new(&conn, &client_info)),
+                    "bookmarks" => Box::new(BookmarksStore::new(&conn, &interruptee)),
+                    "history" => Box::new(HistoryStore::new(&conn, &interruptee)),
                     _ => unimplemented!("Can't sync unsupported engine {}", name),
                 }
             })
@@ -195,55 +215,36 @@ fn sync(
             store.wipe()?;
         }
         if reset {
-            store.reset()?;
+            store.reset(&StoreSyncAssociation::Disconnected)?;
         }
     }
 
     // now the syncs.
-    // XXX - unfortunately, history stores global meta in a `history_global_state`,
-    // but that's a global that should be shared between history and bookmarks.
-    // We should consider changing that key name?
-    // Even more unfortunate, places::storage::get_meta is `pub(crate)`, so we
-    // can't use it here.
-    // Ultimately though, this really needs to be on PlacesApi.
-    use rusqlite::types::{FromSql, ToSql};
-    fn put_meta(db: &PlacesDb, key: &str, value: &ToSql) -> Result<()> {
-        db.execute_named_cached(
-            "REPLACE INTO moz_meta (key, value) VALUES (:key, :value)",
-            &[(":key", &key), (":value", value)],
-        )?;
-        Ok(())
-    }
+    // For now we never persist the global state, which means we may lose
+    // which engines are declined.
+    // That's OK for the short term, and ultimately, syncing functionality
+    // will be in places_api, which will give us this for free.
 
-    fn get_meta<T: FromSql>(db: &PlacesDb, key: &str) -> Result<Option<T>> {
-        let res = db.try_query_one(
-            "SELECT value FROM moz_meta WHERE key = :key",
-            &[(":key", &key)],
-            true,
-        )?;
-        Ok(res)
-    }
+    // Migrate state, which we must do before we sync *any* engine.
+    HistoryStore::migrate_v1_global_state(&conn)?;
 
-    let meta_key_name = "history_global_state";
-    let global_state: Cell<Option<String>> = Cell::new(get_meta(&conn, meta_key_name)?);
-    let client_info = Cell::new(None);
     let mut sync_ping = telemetry::SyncTelemetryPing::new();
 
-    let stores_to_sync: Vec<&dyn Store> = stores.iter().map(|b| b.as_ref()).collect();
+    let stores_to_sync: Vec<&dyn Store> = stores.iter().map(AsRef::as_ref).collect();
     if let Err(e) = sync_multiple(
         &stores_to_sync,
-        &global_state,
-        &client_info,
+        &mut global_state,
+        &mut mem_cached_state,
         &cli_fxa.client_init.clone(),
         &cli_fxa.root_sync_key,
         &mut sync_ping,
+        &interruptee,
     ) {
         log::warn!("Sync failed! {}", e);
         log::warn!("BT: {:?}", e.backtrace());
     } else {
         log::info!("Sync was successful!");
     }
-    put_meta(&conn, meta_key_name, &global_state.replace(None))?;
     println!(
         "Sync telemetry: {}",
         serde_json::to_string_pretty(&sync_ping).unwrap()
@@ -291,7 +292,11 @@ enum Command {
         #[structopt(name = "credentials", long, default_value = "./credentials.json")]
         credential_file: String,
 
-        /// Wipe the server store before syncing.
+        /// Wipe ALL storage from the server before syncing.
+        #[structopt(name = "wipe-all-remote", long)]
+        wipe_all: bool,
+
+        /// Wipe the engine data from the server before syncing.
         #[structopt(name = "wipe-remote", long)]
         wipe: bool,
 
@@ -332,7 +337,7 @@ fn main() -> Result<()> {
     }
 
     let db_path = opts.database_path;
-    let encryption_key: Option<&str> = opts.encryption_key.as_ref().map(|s| &**s);
+    let encryption_key: Option<&str> = opts.encryption_key.as_ref().map(String::as_str);
     let api = PlacesApi::new(&db_path, encryption_key)?;
     let db = api.open_connection(ConnectionType::ReadWrite)?;
 
@@ -340,9 +345,10 @@ fn main() -> Result<()> {
         Command::Sync {
             engines,
             credential_file,
+            wipe_all,
             wipe,
             reset,
-        } => sync(&api, engines, credential_file, wipe, reset),
+        } => sync(&api, engines, credential_file, wipe_all, wipe, reset),
         Command::ExportBookmarks { output_file } => run_native_export(&db, output_file),
         Command::ImportBookmarks { input_file } => run_native_import(&db, input_file),
         Command::ImportDesktopBookmarks { input_file } => run_desktop_import(&db, input_file),

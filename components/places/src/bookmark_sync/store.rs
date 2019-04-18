@@ -10,35 +10,38 @@ use super::record::{
 };
 use super::{SyncedBookmarkKind, SyncedBookmarkValidity};
 use crate::api::places_api::ConnectionType;
-use crate::db::PlacesDb;
+use crate::db::{PlacesDb, PlacesTransaction};
 use crate::error::*;
-use crate::storage::{bookmarks::BookmarkRootGuid, get_meta, put_meta};
+use crate::storage::{bookmarks::BookmarkRootGuid, delete_meta, get_meta, put_meta};
 use crate::types::{BookmarkType, SyncGuid, SyncStatus, Timestamp};
 use dogear::{
     self, Content, Deletion, IntoTree, Item, MergedDescendant, MergedRoot, Tree, UploadReason,
 };
 use rusqlite::{Row, NO_PARAMS};
-use sql_support::{self, ConnExt};
-use std::cell::Cell;
+use sql_support::{self, ConnExt, SqlInterruptScope};
 use std::collections::HashMap;
 use std::fmt;
 use std::result;
-use std::time::Duration;
 use sync15::{
-    telemetry, ClientInfo, CollectionRequest, IncomingChangeset, OutgoingChangeset, Payload,
-    ServerTimestamp, Store,
+    telemetry, CollSyncIds, CollectionRequest, IncomingChangeset, KeyBundle, MemoryCachedState,
+    OutgoingChangeset, Payload, ServerTimestamp, Store, StoreSyncAssociation,
+    Sync15StorageClientInit,
 };
-static LAST_SYNC_META_KEY: &'static str = "bookmarks_last_sync_time";
+pub const LAST_SYNC_META_KEY: &str = "bookmarks_last_sync_time";
+// Note that all engines in this crate should use a *different* meta key
+// for the global sync ID, because engines are reset individually.
+const GLOBAL_SYNCID_META_KEY: &str = "bookmarks_global_sync_id";
+const COLLECTION_SYNCID_META_KEY: &str = "bookmarks_sync_id";
 
 pub struct BookmarksStore<'a> {
     pub db: &'a PlacesDb,
-    pub client_info: &'a Cell<Option<ClientInfo>>,
+    interruptee: &'a SqlInterruptScope,
 }
 
 impl<'a> BookmarksStore<'a> {
-    pub fn new(db: &'a PlacesDb, client_info: &'a Cell<Option<ClientInfo>>) -> Self {
+    pub fn new(db: &'a PlacesDb, interruptee: &'a SqlInterruptScope) -> Self {
         assert_eq!(db.conn_type(), ConnectionType::Sync);
-        Self { db, client_info }
+        Self { db, interruptee }
     }
 
     fn stage_incoming(
@@ -47,9 +50,7 @@ impl<'a> BookmarksStore<'a> {
         incoming_telemetry: &mut telemetry::EngineIncoming,
     ) -> Result<ServerTimestamp> {
         let timestamp = inbound.timestamp;
-        let mut tx = self
-            .db
-            .time_chunked_transaction(Duration::from_millis(1000))?;
+        let mut tx = self.db.begin_transaction()?;
 
         let applicator = IncomingApplicator::new(&self.db);
 
@@ -57,6 +58,7 @@ impl<'a> BookmarksStore<'a> {
             applicator.apply_payload(incoming.0, incoming.1)?;
             incoming_telemetry.applied(1);
             tx.maybe_commit()?;
+            self.interruptee.err_if_interrupted()?;
         }
         tx.commit()?;
         Ok(timestamp)
@@ -92,7 +94,7 @@ impl<'a> BookmarksStore<'a> {
             .try_query_row(
                 &sql,
                 &[],
-                |row| -> rusqlite::Result<_> { Ok(row.get_checked::<_, bool>(0)?) },
+                |row| -> rusqlite::Result<_> { Ok(row.get::<_, bool>(0)?) },
                 false,
             )?
             .unwrap_or(false))
@@ -107,7 +109,8 @@ impl<'a> BookmarksStore<'a> {
     fn update_local_items<'t>(
         &self,
         descendants: Vec<MergedDescendant<'t>>,
-        deletions: Vec<Deletion>,
+        deletions: Vec<Deletion<'_>>,
+        _tx: &mut PlacesTransaction<'_>,
     ) -> Result<()> {
         // First, insert rows for all merged descendants.
         sql_support::each_sized_chunk(
@@ -118,6 +121,7 @@ impl<'a> BookmarksStore<'a> {
                 // parameters per descendant. Rust's `SliceConcatExt::concat`
                 // is semantically equivalent, but requires a second allocation,
                 // which we _can_ avoid by writing this out.
+                self.interruptee.err_if_interrupted()?;
                 let mut params = Vec::with_capacity(chunk.len() * 4);
                 for d in chunk.iter() {
                     params.push(
@@ -263,10 +267,10 @@ impl<'a> BookmarksStore<'a> {
              ORDER BY parentId, position",
         )?;
         let mut results = stmt.query(NO_PARAMS)?;
-        while let Some(result) = results.next() {
-            let row = result?;
-            let local_parent_id = row.get_checked::<_, i64>("parentId")?;
-            let child_guid = row.get_checked::<_, SyncGuid>("guid")?;
+        while let Some(row) = results.next()? {
+            self.interruptee.err_if_interrupted()?;
+            let local_parent_id = row.get::<_, i64>("parentId")?;
+            let child_guid = row.get::<_, SyncGuid>("guid")?;
             let child_record_ids = child_record_ids_by_local_parent_id
                 .entry(local_parent_id)
                 .or_default();
@@ -275,10 +279,10 @@ impl<'a> BookmarksStore<'a> {
 
         let mut stmt = self.db.prepare("SELECT id, tag FROM tagsToUpload")?;
         let mut results = stmt.query(NO_PARAMS)?;
-        while let Some(result) = results.next() {
-            let row = result?;
-            let local_id = row.get_checked::<_, i64>("id")?;
-            let tag = row.get_checked::<_, String>("tag")?;
+        while let Some(row) = results.next()? {
+            self.interruptee.err_if_interrupted()?;
+            let local_id = row.get::<_, i64>("id")?;
+            let tag = row.get::<_, String>("tag")?;
             let tags = tags_by_local_id.entry(local_id).or_default();
             tags.push(tag);
         }
@@ -290,84 +294,83 @@ impl<'a> BookmarksStore<'a> {
                FROM itemsToUpload"#,
         )?;
         let mut results = stmt.query(NO_PARAMS)?;
-        while let Some(result) = results.next() {
-            let row = result?;
-            let guid = row.get_checked::<_, SyncGuid>("guid")?;
-            let is_deleted = row.get_checked::<_, bool>("isDeleted")?;
+        while let Some(row) = results.next()? {
+            self.interruptee.err_if_interrupted()?;
+            let guid = row.get::<_, SyncGuid>("guid")?;
+            let is_deleted = row.get::<_, bool>("isDeleted")?;
             if is_deleted {
                 outgoing.changes.push(Payload::new_tombstone(
                     BookmarkRecordId::from(guid).into_payload_id(),
                 ));
                 continue;
             }
-            let parent_guid = row.get_checked::<_, SyncGuid>("parentGuid")?;
-            let parent_title = row.get_checked::<_, String>("parentTitle")?;
-            let date_added = row.get_checked::<_, i64>("dateAdded")?;
-            let record: BookmarkItemRecord =
-                match SyncedBookmarkKind::from_u8(row.get_checked("kind")?)? {
-                    SyncedBookmarkKind::Bookmark => {
-                        let local_id = row.get_checked::<_, i64>("id")?;
-                        let title = row.get_checked::<_, String>("title")?;
-                        let url = row.get_checked::<_, String>("url")?;
-                        BookmarkRecord {
-                            record_id: guid.into(),
-                            parent_record_id: Some(parent_guid.into()),
-                            parent_title: Some(parent_title),
-                            date_added: Some(date_added),
-                            has_dupe: true,
-                            title: Some(title),
-                            url: Some(url),
-                            keyword: row.get_checked::<_, Option<String>>("keyword")?,
-                            tags: tags_by_local_id.remove(&local_id).unwrap_or_default(),
-                        }
-                        .into()
+            let parent_guid = row.get::<_, SyncGuid>("parentGuid")?;
+            let parent_title = row.get::<_, String>("parentTitle")?;
+            let date_added = row.get::<_, i64>("dateAdded")?;
+            let record: BookmarkItemRecord = match SyncedBookmarkKind::from_u8(row.get("kind")?)? {
+                SyncedBookmarkKind::Bookmark => {
+                    let local_id = row.get::<_, i64>("id")?;
+                    let title = row.get::<_, String>("title")?;
+                    let url = row.get::<_, String>("url")?;
+                    BookmarkRecord {
+                        record_id: guid.into(),
+                        parent_record_id: Some(parent_guid.into()),
+                        parent_title: Some(parent_title),
+                        date_added: Some(date_added),
+                        has_dupe: true,
+                        title: Some(title),
+                        url: Some(url),
+                        keyword: row.get::<_, Option<String>>("keyword")?,
+                        tags: tags_by_local_id.remove(&local_id).unwrap_or_default(),
                     }
-                    SyncedBookmarkKind::Query => {
-                        let title = row.get_checked::<_, String>("title")?;
-                        let url = row.get_checked::<_, String>("url")?;
-                        QueryRecord {
-                            record_id: guid.into(),
-                            parent_record_id: Some(parent_guid.into()),
-                            parent_title: Some(parent_title),
-                            date_added: Some(date_added),
-                            has_dupe: true,
-                            title: Some(title),
-                            url: Some(url),
-                            tag_folder_name: None,
-                        }
-                        .into()
+                    .into()
+                }
+                SyncedBookmarkKind::Query => {
+                    let title = row.get::<_, String>("title")?;
+                    let url = row.get::<_, String>("url")?;
+                    QueryRecord {
+                        record_id: guid.into(),
+                        parent_record_id: Some(parent_guid.into()),
+                        parent_title: Some(parent_title),
+                        date_added: Some(date_added),
+                        has_dupe: true,
+                        title: Some(title),
+                        url: Some(url),
+                        tag_folder_name: None,
                     }
-                    SyncedBookmarkKind::Folder => {
-                        let title = row.get_checked::<_, String>("title")?;
-                        let local_id = row.get_checked::<_, i64>("id")?;
-                        let children = child_record_ids_by_local_parent_id
-                            .remove(&local_id)
-                            .unwrap_or_default();
-                        FolderRecord {
-                            record_id: guid.into(),
-                            parent_record_id: Some(parent_guid.into()),
-                            parent_title: Some(parent_title),
-                            date_added: Some(date_added),
-                            has_dupe: true,
-                            title: Some(title),
-                            children,
-                        }
-                        .into()
+                    .into()
+                }
+                SyncedBookmarkKind::Folder => {
+                    let title = row.get::<_, String>("title")?;
+                    let local_id = row.get::<_, i64>("id")?;
+                    let children = child_record_ids_by_local_parent_id
+                        .remove(&local_id)
+                        .unwrap_or_default();
+                    FolderRecord {
+                        record_id: guid.into(),
+                        parent_record_id: Some(parent_guid.into()),
+                        parent_title: Some(parent_title),
+                        date_added: Some(date_added),
+                        has_dupe: true,
+                        title: Some(title),
+                        children,
                     }
-                    SyncedBookmarkKind::Livemark => continue,
-                    SyncedBookmarkKind::Separator => {
-                        let position = row.get_checked::<_, i64>("position")?;
-                        SeparatorRecord {
-                            record_id: guid.into(),
-                            parent_record_id: Some(parent_guid.into()),
-                            parent_title: Some(parent_title),
-                            date_added: Some(date_added),
-                            has_dupe: true,
-                            position: Some(position),
-                        }
-                        .into()
+                    .into()
+                }
+                SyncedBookmarkKind::Livemark => continue,
+                SyncedBookmarkKind::Separator => {
+                    let position = row.get::<_, i64>("position")?;
+                    SeparatorRecord {
+                        record_id: guid.into(),
+                        parent_record_id: Some(parent_guid.into()),
+                        parent_title: Some(parent_title),
+                        date_added: Some(date_added),
+                        has_dupe: true,
+                        position: Some(position),
                     }
-                };
+                    .into()
+                }
+            };
             outgoing.changes.push(Payload::from_record(record)?);
         }
 
@@ -385,6 +388,8 @@ impl<'a> BookmarksStore<'a> {
         // Flag all successfully synced records as uploaded. This `UPDATE` fires
         // the `pushUploadedChanges` trigger, which updates local change
         // counters and writes the items back to the synced bookmarks table.
+        let mut tx = self.db.begin_transaction()?;
+
         let guids = records_synced
             .into_iter()
             .map(|id| BookmarkRecordId::from_payload_id(id).into())
@@ -400,6 +405,8 @@ impl<'a> BookmarksStore<'a> {
                 ),
                 chunk,
             )?;
+            tx.maybe_commit()?;
+            self.interruptee.err_if_interrupted()?;
             Ok(())
         })?;
 
@@ -413,8 +420,35 @@ impl<'a> BookmarksStore<'a> {
 
         // Clean up.
         self.db.execute_batch("DELETE FROM itemsToUpload")?;
+        tx.commit()?;
 
         Ok(())
+    }
+
+    pub fn sync(
+        &self,
+        storage_init: &Sync15StorageClientInit,
+        root_sync_key: &KeyBundle,
+        mem_cached_state: &mut MemoryCachedState,
+        disk_cached_state: &mut Option<String>,
+        sync_ping: &mut telemetry::SyncTelemetryPing,
+    ) -> Result<()> {
+        let result = sync15::sync_multiple(
+            &[self],
+            disk_cached_state,
+            mem_cached_state,
+            storage_init,
+            root_sync_key,
+            sync_ping,
+            self.interruptee,
+        );
+        let failures = result?;
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            let (_, err) = failures.into_iter().next().unwrap();
+            Err(err.into())
+        }
     }
 }
 
@@ -450,9 +484,7 @@ impl<'a> Store for BookmarksStore<'a> {
         new_timestamp: ServerTimestamp,
         records_synced: Vec<String>,
     ) -> result::Result<(), failure::Error> {
-        let tx = self.db.unchecked_transaction()?;
         self.push_synced_items(new_timestamp, records_synced)?;
-        tx.commit()?;
         Ok(())
     }
 
@@ -465,12 +497,22 @@ impl<'a> Store for BookmarksStore<'a> {
             .newer_than(since))
     }
 
+    fn get_sync_assoc(&self) -> result::Result<StoreSyncAssociation, failure::Error> {
+        let global = get_meta(self.db, GLOBAL_SYNCID_META_KEY)?;
+        let coll = get_meta(self.db, COLLECTION_SYNCID_META_KEY)?;
+        Ok(if let (Some(global), Some(coll)) = (global, coll) {
+            StoreSyncAssociation::Connected(CollSyncIds { global, coll })
+        } else {
+            StoreSyncAssociation::Disconnected
+        })
+    }
+
     /// Removes all sync metadata, such that the next sync is treated as a
     /// first sync. Unlike `wipe`, this keeps all local items, but clears
     /// all synced items and pending tombstones. This also forgets the last
     /// sync time.
-    fn reset(&self) -> result::Result<(), failure::Error> {
-        let tx = self.db.unchecked_transaction()?;
+    fn reset(&self, assoc: &StoreSyncAssociation) -> result::Result<(), failure::Error> {
+        let tx = self.db.begin_transaction()?;
         self.db.execute_batch(&format!(
             "DELETE FROM moz_bookmarks_synced;
 
@@ -483,6 +525,16 @@ impl<'a> Store for BookmarksStore<'a> {
         ))?;
         create_synced_bookmark_roots(self.db)?;
         put_meta(self.db, LAST_SYNC_META_KEY, &0)?;
+        match assoc {
+            StoreSyncAssociation::Disconnected => {
+                delete_meta(self.db, GLOBAL_SYNCID_META_KEY)?;
+                delete_meta(self.db, COLLECTION_SYNCID_META_KEY)?;
+            }
+            StoreSyncAssociation::Connected(ids) => {
+                put_meta(self.db, GLOBAL_SYNCID_META_KEY, &ids.global)?;
+                put_meta(self.db, COLLECTION_SYNCID_META_KEY, &ids.coll)?;
+            }
+        };
         tx.commit()?;
         Ok(())
     }
@@ -494,7 +546,7 @@ impl<'a> Store for BookmarksStore<'a> {
     /// Conceptually, the next sync will merge an empty local tree, and a full
     /// remote tree.
     fn wipe(&self) -> result::Result<(), failure::Error> {
-        let tx = self.db.unchecked_transaction()?;
+        let tx = self.db.begin_transaction()?;
         let sql = format!(
             "INSERT INTO moz_bookmarks_deleted(guid, dateRemoved)
              SELECT guid, now()
@@ -540,7 +592,7 @@ struct Merger<'a> {
 }
 
 impl<'a> Merger<'a> {
-    fn new(store: &'a BookmarksStore, remote_time: ServerTimestamp) -> Self {
+    fn new(store: &'a BookmarksStore<'_>, remote_time: ServerTimestamp) -> Self {
         Self {
             store,
             remote_time,
@@ -560,24 +612,24 @@ impl<'a> Merger<'a> {
     }
 
     /// Creates a local tree item from a row in the `localItems` CTE.
-    fn local_row_to_item(&self, row: &Row) -> Result<Item> {
-        let guid = row.get_checked::<_, SyncGuid>("guid")?;
-        let kind = SyncedBookmarkKind::from_u8(row.get_checked("kind")?)?;
+    fn local_row_to_item(&self, row: &Row<'_>) -> Result<Item> {
+        let guid = row.get::<_, SyncGuid>("guid")?;
+        let kind = SyncedBookmarkKind::from_u8(row.get("kind")?)?;
         let mut item = Item::new(guid.into(), kind.into());
         // Note that this doesn't account for local clock skew.
         let age = self
             .local_time
-            .duration_since(row.get_checked::<_, Timestamp>("localModified")?)
+            .duration_since(row.get::<_, Timestamp>("localModified")?)
             .unwrap_or_default();
         item.age = age.as_secs() as i64 * 1000 + i64::from(age.subsec_millis());
-        item.needs_merge = row.get_checked::<_, u32>("syncChangeCounter")? > 0;
+        item.needs_merge = row.get::<_, u32>("syncChangeCounter")? > 0;
         Ok(item)
     }
 
     /// Creates a remote tree item from a row in `moz_bookmarks_synced`.
-    fn remote_row_to_item(&self, row: &Row) -> Result<Item> {
-        let guid = row.get_checked::<_, SyncGuid>("guid")?;
-        let kind = SyncedBookmarkKind::from_u8(row.get_checked("kind")?)?;
+    fn remote_row_to_item(&self, row: &Row<'_>) -> Result<Item> {
+        let guid = row.get::<_, SyncGuid>("guid")?;
+        let kind = SyncedBookmarkKind::from_u8(row.get("kind")?)?;
         let mut item = Item::new(guid.into(), kind.into());
         // note that serverModified in this table is an int with ms, which isn't
         // the format of a ServerTimestamp - so we convert it into a number
@@ -585,12 +637,12 @@ impl<'a> Merger<'a> {
         let age = self
             .remote_time
             .duration_since(ServerTimestamp(
-                row.get_checked::<_, f64>("serverModified")? / 1000.0,
+                row.get::<_, f64>("serverModified")? / 1000.0,
             ))
             .unwrap_or_default();
         item.age = age.as_secs() as i64 * 1000 + i64::from(age.subsec_millis());
-        item.needs_merge = row.get_checked("needsMerge")?;
-        item.validity = SyncedBookmarkValidity::from_u8(row.get_checked("validity")?)?.into();
+        item.needs_merge = row.get("needsMerge")?;
+        item.validity = SyncedBookmarkValidity::from_u8(row.get("validity")?)?.into();
         Ok(item)
     }
 }
@@ -611,18 +663,16 @@ impl<'a> dogear::Store<Error> for Merger<'a> {
         );
         let mut stmt = self.store.db.prepare(&sql)?;
         let mut results = stmt.query(NO_PARAMS)?;
-        let mut builder = match results.next() {
-            Some(result) => {
+        let mut builder = match results.next()? {
+            Some(row) => {
                 // The first row is always the root.
-                let row = result?;
                 Tree::with_root(self.local_row_to_item(&row)?)
             }
             None => return Err(ErrorKind::Corruption(Corruption::InvalidLocalRoots).into()),
         };
-        while let Some(result) = results.next() {
+        while let Some(row) = results.next()? {
             // All subsequent rows are descendants.
-            let row = result?;
-            let parent_guid = row.get_checked::<_, SyncGuid>("parentGuid")?;
+            let parent_guid = row.get::<_, SyncGuid>("parentGuid")?;
             builder
                 .item(self.local_row_to_item(&row)?)?
                 .by_structure(&parent_guid.into())?;
@@ -635,7 +685,7 @@ impl<'a> dogear::Store<Error> for Merger<'a> {
             .store
             .db
             .prepare("SELECT guid FROM moz_bookmarks_deleted")?;
-        let rows = stmt.query_and_then(NO_PARAMS, |row| row.get_checked::<_, SyncGuid>("guid"))?;
+        let rows = stmt.query_and_then(NO_PARAMS, |row| row.get::<_, SyncGuid>("guid"))?;
         for row in rows {
             let guid = row?;
             tree.note_deleted(guid.into());
@@ -665,28 +715,27 @@ impl<'a> dogear::Store<Error> for Merger<'a> {
         );
         let mut stmt = self.store.db.prepare(&sql)?;
         let mut results = stmt.query(NO_PARAMS)?;
-        while let Some(result) = results.next() {
-            let row = result?;
-            let typ = match BookmarkType::from_u8(row.get_checked("type")?) {
+        while let Some(row) = results.next()? {
+            let typ = match BookmarkType::from_u8(row.get("type")?) {
                 Some(t) => t,
                 None => continue,
             };
             let content = match typ {
                 BookmarkType::Bookmark => {
-                    let title = row.get_checked("title")?;
-                    let url_href = row.get_checked("url")?;
+                    let title = row.get("title")?;
+                    let url_href = row.get("url")?;
                     Content::Bookmark { title, url_href }
                 }
                 BookmarkType::Folder => {
-                    let title = row.get_checked("title")?;
+                    let title = row.get("title")?;
                     Content::Folder { title }
                 }
                 BookmarkType::Separator => {
-                    let position = row.get_checked("position")?;
+                    let position = row.get("position")?;
                     Content::Separator { position }
                 }
             };
-            let guid = row.get_checked::<_, SyncGuid>("guid")?;
+            let guid = row.get::<_, SyncGuid>("guid")?;
             contents.insert(guid.into(), content);
         }
 
@@ -718,20 +767,21 @@ impl<'a> dogear::Store<Error> for Merger<'a> {
                 false,
             )?
             .ok_or_else(|| ErrorKind::Corruption(Corruption::InvalidSyncedRoots))?;
+        builder.reparent_orphans_to(&dogear::UNFILED_GUID);
 
         let sql = format!(
             "SELECT guid, parentGuid, serverModified, kind, needsMerge, validity
              FROM moz_bookmarks_synced
              WHERE NOT isDeleted AND
-                   guid <> '{root_guid}'",
+                   guid <> '{root_guid}'
+             ORDER BY guid",
             root_guid = BookmarkRootGuid::Root.as_guid().as_ref()
         );
         let mut stmt = self.store.db.prepare(&sql)?;
         let mut results = stmt.query(NO_PARAMS)?;
-        while let Some(result) = results.next() {
-            let row = result?;
+        while let Some(row) = results.next()? {
             let p = builder.item(self.remote_row_to_item(&row)?)?;
-            if let Some(parent_guid) = row.get_checked::<_, Option<SyncGuid>>("parentGuid")? {
+            if let Some(parent_guid) = row.get::<_, Option<SyncGuid>>("parentGuid")? {
                 p.by_parent_guid(parent_guid.into())?;
             }
         }
@@ -744,10 +794,9 @@ impl<'a> dogear::Store<Error> for Merger<'a> {
         );
         let mut stmt = self.store.db.prepare(&sql)?;
         let mut results = stmt.query(NO_PARAMS)?;
-        while let Some(result) = results.next() {
-            let row = result?;
-            let guid = row.get_checked::<_, SyncGuid>("guid")?;
-            let parent_guid = row.get_checked::<_, SyncGuid>("parentGuid")?;
+        while let Some(row) = results.next()? {
+            let guid = row.get::<_, SyncGuid>("guid")?;
+            let parent_guid = row.get::<_, SyncGuid>("parentGuid")?;
             builder
                 .parent_for(&guid.into())
                 .by_children(&parent_guid.into())?;
@@ -760,7 +809,7 @@ impl<'a> dogear::Store<Error> for Merger<'a> {
             .store
             .db
             .prepare("SELECT guid FROM moz_bookmarks_synced WHERE isDeleted AND needsMerge")?;
-        let rows = stmt.query_and_then(NO_PARAMS, |row| row.get_checked::<_, SyncGuid>("guid"))?;
+        let rows = stmt.query_and_then(NO_PARAMS, |row| row.get::<_, SyncGuid>("guid"))?;
         for row in rows {
             let guid = row?;
             tree.note_deleted(guid.into());
@@ -789,25 +838,24 @@ impl<'a> dogear::Store<Error> for Merger<'a> {
         );
         let mut stmt = self.store.db.prepare(&sql)?;
         let mut results = stmt.query(NO_PARAMS)?;
-        while let Some(result) = results.next() {
-            let row = result?;
-            let content = match SyncedBookmarkKind::from_u8(row.get_checked("kind")?)? {
+        while let Some(row) = results.next()? {
+            let content = match SyncedBookmarkKind::from_u8(row.get("kind")?)? {
                 SyncedBookmarkKind::Bookmark | SyncedBookmarkKind::Query => {
-                    let title = row.get_checked("title")?;
-                    let url_href = row.get_checked("url")?;
+                    let title = row.get("title")?;
+                    let url_href = row.get("url")?;
                     Content::Bookmark { title, url_href }
                 }
                 SyncedBookmarkKind::Folder => {
-                    let title = row.get_checked("title")?;
+                    let title = row.get("title")?;
                     Content::Folder { title }
                 }
                 SyncedBookmarkKind::Separator => {
-                    let position = row.get_checked("position")?;
+                    let position = row.get("position")?;
                     Content::Separator { position }
                 }
                 _ => continue,
             };
-            let guid = row.get_checked::<_, SyncGuid>("guid")?;
+            let guid = row.get::<_, SyncGuid>("guid")?;
             contents.insert(guid.into(), content);
         }
 
@@ -822,8 +870,9 @@ impl<'a> dogear::Store<Error> for Merger<'a> {
         let descendants = root.descendants();
         let deletions = deletions.collect::<Vec<_>>();
 
-        let tx = self.store.db.unchecked_transaction()?;
-        self.store.update_local_items(descendants, deletions)?;
+        let mut tx = self.store.db.begin_transaction()?;
+        self.store
+            .update_local_items(descendants, deletions, &mut tx)?;
         self.store.stage_local_items_to_upload()?;
         self.store.db.execute_batch(
             "DELETE FROM mergedTree;
@@ -839,7 +888,7 @@ impl<'a> dogear::Store<Error> for Merger<'a> {
 struct LocalItemsFragment<'a>(&'a str);
 
 impl<'a> fmt::Display for LocalItemsFragment<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "{name}(id, guid, parentId, parentGuid, position, type, title, parentTitle,
@@ -879,7 +928,7 @@ struct ItemKindFragment {
 }
 
 impl fmt::Display for ItemKindFragment {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "(CASE {typ}
@@ -918,7 +967,7 @@ enum UrlOrPlaceIdFragment {
 }
 
 impl fmt::Display for UrlOrPlaceIdFragment {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             UrlOrPlaceIdFragment::Url(s) => write!(f, "{}", s),
             UrlOrPlaceIdFragment::PlaceId(s) => {
@@ -933,7 +982,7 @@ impl fmt::Display for UrlOrPlaceIdFragment {
 struct RootsFragment<'a>(&'a [BookmarkRootGuid]);
 
 impl<'a> fmt::Display for RootsFragment<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(")?;
         for (i, guid) in self.0.iter().enumerate() {
             if i != 0 {
@@ -964,13 +1013,12 @@ mod tests {
     use serde_json::{json, Value};
     use url::Url;
 
-    use std::cell::Cell;
     use sync15::Payload;
 
     fn apply_incoming(conn: &PlacesDb, records_json: Value) {
         // suck records into the store.
-        let client_info = Cell::new(None);
-        let store = BookmarksStore::new(&conn, &client_info);
+        let interrupt_scope = conn.begin_interrupt_scope();
+        let store = BookmarksStore::new(&conn, &interrupt_scope);
 
         let mut incoming =
             IncomingChangeset::new(store.collection_name().to_string(), ServerTimestamp(0.0));
@@ -1001,12 +1049,10 @@ mod tests {
         local_tree: Value,
     ) {
         let conn = api
-            .open_connection(ConnectionType::Sync)
+            .open_sync_connection()
             .expect("should get a sync connection");
         apply_incoming(&conn, records_json);
         assert_local_json_tree(&conn, local_folder, local_tree);
-        api.close_connection(conn)
-            .expect("should close sync connection");
     }
 
     #[test]
@@ -1036,11 +1082,11 @@ mod tests {
         ];
 
         let api = new_mem_api();
-        let conn = api.open_connection(ConnectionType::Sync)?;
+        let conn = api.open_sync_connection()?;
 
         // suck records into the store.
-        let client_info = Cell::new(None);
-        let store = BookmarksStore::new(&conn, &client_info);
+        let interrupt_scope = conn.begin_interrupt_scope();
+        let store = BookmarksStore::new(&conn, &interrupt_scope);
 
         let mut incoming =
             IncomingChangeset::new(store.collection_name().to_string(), ServerTimestamp(0.0));
@@ -1100,13 +1146,15 @@ mod tests {
     #[test]
     fn test_fetch_local_tree() -> Result<()> {
         let api = new_mem_api();
-        let conn = api.open_connection(ConnectionType::Sync)?;
+        let writer = api.open_connection(ConnectionType::ReadWrite)?;
+        let syncer = api.open_sync_connection()?;
 
-        conn.execute("UPDATE moz_bookmarks SET syncChangeCounter = 0", NO_PARAMS)
+        writer
+            .execute("UPDATE moz_bookmarks SET syncChangeCounter = 0", NO_PARAMS)
             .expect("should work");
 
         insert_local_json_tree(
-            &conn,
+            &writer,
             json!({
                 "guid": &BookmarkRootGuid::Unfiled.as_guid(),
                 "children": [
@@ -1119,8 +1167,8 @@ mod tests {
             }),
         );
 
-        let client_info = Cell::new(None);
-        let store = BookmarksStore::new(&conn, &client_info);
+        let interrupt_scope = syncer.begin_interrupt_scope();
+        let store = BookmarksStore::new(&syncer, &interrupt_scope);
         let merger = Merger::new(&store, ServerTimestamp(0.0));
 
         let tree = merger.fetch_local_tree()?;
@@ -1289,7 +1337,7 @@ mod tests {
     fn test_apply() -> Result<()> {
         let api = new_mem_api();
         let writer = api.open_connection(ConnectionType::ReadWrite)?;
-        let syncer = api.open_connection(ConnectionType::Sync)?;
+        let syncer = api.open_sync_connection()?;
 
         syncer
             .execute("UPDATE moz_bookmarks SET syncChangeCounter = 0", NO_PARAMS)
@@ -1342,8 +1390,8 @@ mod tests {
             }),
         ];
 
-        let client_info = Cell::new(None);
-        let store = BookmarksStore::new(&syncer, &client_info);
+        let interrupt_scope = syncer.begin_interrupt_scope();
+        let store = BookmarksStore::new(&syncer, &interrupt_scope);
 
         let mut incoming =
             IncomingChangeset::new(store.collection_name().to_string(), ServerTimestamp(0.0));
@@ -1463,7 +1511,7 @@ mod tests {
     fn test_keywords() -> Result<()> {
         let api = new_mem_api();
         let writer = api.open_connection(ConnectionType::ReadWrite)?;
-        let syncer = api.open_connection(ConnectionType::Sync)?;
+        let syncer = api.open_sync_connection()?;
 
         let records = vec![
             json!({
@@ -1487,8 +1535,8 @@ mod tests {
             }),
         ];
 
-        let client_info = Cell::new(None);
-        let store = BookmarksStore::new(&syncer, &client_info);
+        let interrupt_scope = syncer.begin_interrupt_scope();
+        let store = BookmarksStore::new(&syncer, &interrupt_scope);
 
         let mut incoming =
             IncomingChangeset::new(store.collection_name().to_string(), ServerTimestamp(0.0));
@@ -1539,7 +1587,7 @@ mod tests {
     fn test_wipe() -> Result<()> {
         let api = new_mem_api();
         let writer = api.open_connection(ConnectionType::ReadWrite)?;
-        let syncer = api.open_connection(ConnectionType::Sync)?;
+        let syncer = api.open_sync_connection()?;
 
         let records = vec![
             json!({
@@ -1616,8 +1664,8 @@ mod tests {
             }),
         ];
 
-        let client_info = Cell::new(None);
-        let store = BookmarksStore::new(&syncer, &client_info);
+        let interrupt_scope = syncer.begin_interrupt_scope();
+        let store = BookmarksStore::new(&syncer, &interrupt_scope);
 
         let mut incoming =
             IncomingChangeset::new(store.collection_name().to_string(), ServerTimestamp(0.0));

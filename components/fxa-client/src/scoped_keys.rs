@@ -4,7 +4,8 @@
 
 use crate::errors::*;
 use byteorder::{BigEndian, ByteOrder};
-use ring::{aead, agreement, agreement::EphemeralPrivateKey, digest, rand::SecureRandom};
+use rc_crypto::digest;
+use ring::{aead, agreement, agreement::EphemeralPrivateKey, rand::SecureRandom};
 use serde_json::{self, json};
 use untrusted::Input;
 
@@ -18,7 +19,7 @@ pub struct ScopedKeysFlow {
 /// In the past, we chose cjose to do that job, but it added three C dependencies to build and link
 /// against: jansson, openssl and cjose itself.
 impl ScopedKeysFlow {
-    pub fn with_random_key(rng: &SecureRandom) -> Result<ScopedKeysFlow> {
+    pub fn with_random_key(rng: &dyn SecureRandom) -> Result<ScopedKeysFlow> {
         let private_key = EphemeralPrivateKey::generate(&agreement::ECDH_P256, rng)
             .map_err(|_| ErrorKind::KeyGenerationFailed)?;
         Ok(ScopedKeysFlow { private_key })
@@ -92,7 +93,7 @@ impl ScopedKeysFlow {
                 buf.extend_from_slice(&to_32b_buf(apv.len() as u32));
                 buf.extend_from_slice(apv.as_bytes());
                 buf.extend_from_slice(&to_32b_buf(256));
-                Ok(digest::digest(&digest::SHA256, &buf).as_ref()[0..32].to_vec())
+                Ok(digest::digest(&digest::SHA256, &buf)?)
             },
         )?;
 
@@ -112,7 +113,7 @@ impl ScopedKeysFlow {
         let aad = aead::Aad::from(segments[0].as_bytes());
         let plaintext = aead::open_in_place(&opening_key, nonce, aad, 0, &mut in_out)
             .map_err(|_| ErrorKind::AEADOpenFailure)?;
-        String::from_utf8(plaintext.to_vec()).map_err(|e| e.into())
+        String::from_utf8(plaintext.to_vec()).map_err(Into::into)
     }
 }
 

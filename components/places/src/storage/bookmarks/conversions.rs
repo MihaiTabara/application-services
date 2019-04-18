@@ -15,7 +15,7 @@ use url::Url;
 
 impl From<BookmarkTreeNode> for PublicNode {
     // TODO: Eventually this should either be a function that takes an
-    // InterruptScope, or we should have another version that does.
+    // SqlInterruptScope, or we should have another version that does.
     // For now it is likely fine.
     fn from(n: BookmarkTreeNode) -> Self {
         let (date_added, last_modified) = n.created_modified();
@@ -70,7 +70,7 @@ impl From<PublicNode> for msg_types::BookmarkNode {
             date_added: Some(n.date_added.0 as i64),
             last_modified: Some(n.last_modified.0 as i64),
             title: n.title,
-            url: n.url.map(|u| u.into_string()),
+            url: n.url.map(url::Url::into_string),
             parent_guid: n.parent_guid.map(|g| g.0),
             position: Some(n.position),
             child_guids: n.child_guids.map_or(vec![], |child_guids| {

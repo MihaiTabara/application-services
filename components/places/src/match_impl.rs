@@ -36,7 +36,7 @@ pub enum MatchBehavior {
 
 impl FromSql for MatchBehavior {
     #[inline]
-    fn column_result(value: ValueRef) -> FromSqlResult<Self> {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         Ok(match value.as_i64()? {
             0 => MatchBehavior::Anywhere,
             1 => MatchBehavior::BoundaryAnywhere,
@@ -51,7 +51,7 @@ impl FromSql for MatchBehavior {
 
 impl ToSql for MatchBehavior {
     #[inline]
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::from(*self as u32))
     }
 }
@@ -111,7 +111,7 @@ impl SearchBehavior {
 
 impl FromSql for SearchBehavior {
     #[inline]
-    fn column_result(value: ValueRef) -> FromSqlResult<Self> {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         SearchBehavior::from_bits(u32::column_result(value)?)
             .ok_or_else(|| FromSqlError::InvalidType)
     }
@@ -119,7 +119,7 @@ impl FromSql for SearchBehavior {
 
 impl ToSql for SearchBehavior {
     #[inline]
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::from(self.bits()))
     }
 }
@@ -306,19 +306,6 @@ pub fn find_in_string(token: &str, src: &str, only_boundary: bool) -> bool {
     false
 }
 
-// Places splits on ascii whitespace, so we do too. str::split_ascii_whitespace is
-// currently not stable, so we use this, which is the same thing and based on it's source.
-#[inline]
-fn ascii_words<'a>(text: &'a str) -> impl Iterator<Item = &'a str> + 'a {
-    use std::str;
-    text.as_bytes()
-        .split(|c| c.is_ascii_whitespace())
-        .filter(|s| !s.is_empty())
-        // This is safe because there's no way to remove ascii text from a
-        // utf-8 string that makes it invalid utf-8 (and that's all we've done).
-        .map(|s| unsafe { str::from_utf8_unchecked(s) })
-}
-
 // Search functions used as function pointers by AutocompleteMatch::Invoke
 
 fn find_anywhere(token: &str, source: &str) -> bool {
@@ -425,7 +412,7 @@ impl<'search, 'url, 'title, 'tags> AutocompleteMatch<'search, 'url, 'title, 'tag
 
         let trimmed_url = util::slice_up_to(fixed_url.as_ref(), MAX_CHARS_TO_SEARCH_THROUGH);
         let trimmed_title = util::slice_up_to(self.title_str, MAX_CHARS_TO_SEARCH_THROUGH);
-        for token in ascii_words(self.search_str) {
+        for token in self.search_str.split_ascii_whitespace() {
             let matches = match (
                 self.has_behavior(SearchBehavior::TITLE),
                 self.has_behavior(SearchBehavior::URL),

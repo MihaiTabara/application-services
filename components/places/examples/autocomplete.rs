@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #![allow(unknown_lints)]
+#![warn(rust_2018_idioms)]
 
 use clap::value_t;
 use failure::bail;
@@ -60,13 +61,13 @@ impl From<VisitObservation> for SerializedObservation {
     fn from(visit: VisitObservation) -> Self {
         Self {
             url: visit.url.to_string(),
-            title: visit.title.clone(),
+            title: visit.title,
             visit_type: visit.visit_type.map(|vt| vt as u8),
-            at: visit.at.map(|at| at.into()),
+            at: visit.at.map(Into::into),
             error: visit.is_error.unwrap_or(false),
             is_redirect_source: visit.is_redirect_source.unwrap_or(false),
             remote: visit.is_remote.unwrap_or(false),
-            referrer: visit.referrer.map(|url| url.to_string()),
+            referrer: visit.referrer,
         }
     }
 }
@@ -100,23 +101,23 @@ struct LegacyPlace {
 }
 
 impl LegacyPlace {
-    pub fn from_row(row: &rusqlite::Row) -> Self {
+    pub fn from_row(row: &rusqlite::Row<'_>) -> Self {
         Self {
-            id: row.get("place_id"),
-            guid: row.get("place_guid"),
-            title: row.get("place_title"),
-            url: row.get("place_url"),
-            description: row.get("place_description"),
-            preview_image_url: row.get("place_preview_image_url"),
-            typed: row.get("place_typed"),
-            hidden: row.get("place_hidden"),
-            visit_count: row.get("place_visit_count"),
-            last_visit_date: row.get("place_last_visit_date"),
+            id: row.get_unwrap("place_id"),
+            guid: row.get_unwrap("place_guid"),
+            title: row.get_unwrap("place_title"),
+            url: row.get_unwrap("place_url"),
+            description: row.get_unwrap("place_description"),
+            preview_image_url: row.get_unwrap("place_preview_image_url"),
+            typed: row.get_unwrap("place_typed"),
+            hidden: row.get_unwrap("place_hidden"),
+            visit_count: row.get_unwrap("place_visit_count"),
+            last_visit_date: row.get_unwrap("place_last_visit_date"),
             visits: vec![LegacyPlaceVisit {
-                id: row.get("visit_id"),
-                date: row.get("visit_date"),
-                visit_type: row.get("visit_type"),
-                from_visit: row.get("visit_from_visit"),
+                id: row.get_unwrap("visit_id"),
+                date: row.get_unwrap("visit_date"),
+                visit_type: row.get_unwrap("visit_type"),
+                from_visit: row.get_unwrap("visit_from_visit"),
             }],
         }
     }
@@ -149,13 +150,13 @@ fn import_places(
     let (place_count, visit_count) = {
         let mut stmt = old.prepare("SELECT count(*) FROM moz_places").unwrap();
         let mut rows = stmt.query(NO_PARAMS).unwrap();
-        let ps: i64 = rows.next().unwrap()?.get(0);
+        let ps: i64 = rows.next()?.unwrap().get_unwrap(0);
 
         let mut stmt = old
             .prepare("SELECT count(*) FROM moz_historyvisits")
             .unwrap();
         let mut rows = stmt.query(NO_PARAMS).unwrap();
-        let vs: i64 = rows.next().unwrap()?.get(0);
+        let vs: i64 = rows.next()?.unwrap().get_unwrap(0);
         (ps, vs)
     };
 
@@ -205,15 +206,14 @@ fn import_places(
         place_counter, place_count
     );
     let _ = std::io::stdout().flush();
-    while let Some(row_or_error) = rows.next() {
-        let row = row_or_error?;
-        let id: i64 = row.get("place_id");
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get("place_id")?;
         if current_place.id == id {
             current_place.visits.push(LegacyPlaceVisit {
-                id: row.get("visit_id"),
-                date: row.get("visit_date"),
-                visit_type: row.get("visit_type"),
-                from_visit: row.get("visit_from_visit"),
+                id: row.get("visit_id")?,
+                date: row.get("visit_date")?,
+                visit_type: row.get("visit_type")?,
+                from_visit: row.get("visit_from_visit")?,
             });
             continue;
         }
@@ -250,8 +250,9 @@ where
 mod autocomplete {
     use super::*;
     use places::api::matcher::{search_frecent, SearchParams, SearchResult};
-    use places::{ErrorKind, PlacesInterruptHandle};
+    use places::ErrorKind;
     use rusqlite::{Error as RusqlError, ErrorCode};
+    use sql_support::SqlInterruptHandle;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         mpsc, Arc,
@@ -307,7 +308,7 @@ mod autocomplete {
         // Thread handle for the BG thread. We can't drop this without problems so we
         // prefix with _ to shut rust up about it being unused.
         _handle: thread::JoinHandle<Result<()>>,
-        interrupt_handle: PlacesInterruptHandle,
+        interrupt_handle: SqlInterruptHandle,
     }
 
     impl BackgroundAutocomplete {
@@ -348,7 +349,7 @@ mod autocomplete {
                             }
                             Err(e) => {
                                 match e.kind() {
-                                    ErrorKind::InterruptedError => {
+                                    ErrorKind::InterruptedError(_) => {
                                         // Ignore.
                                     }
                                     ErrorKind::SqlError(RusqlError::SqliteFailure(err, _))
@@ -507,7 +508,7 @@ mod autocomplete {
 
         let mut autocompleter = BackgroundAutocomplete::start(ConnectionArgs {
             path: db_path,
-            encryption_key: encryption_key.map(|s| s.to_owned()),
+            encryption_key: encryption_key.map(ToString::to_string),
         })?;
 
         let mut stdin = termion::async_stdin();

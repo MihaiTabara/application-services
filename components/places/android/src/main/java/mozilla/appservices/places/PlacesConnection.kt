@@ -79,9 +79,22 @@ class PlacesApi(path: String, encryptionKey: String? = null) : PlacesManager, Au
         }
     }
 
-    override fun sync(syncInfo: SyncAuthInfo) {
+    override fun syncHistory(syncInfo: SyncAuthInfo) {
         rustCall(this) { error ->
             LibPlacesFFI.INSTANCE.sync15_history_sync(
+                    this.handle.get(),
+                    syncInfo.kid,
+                    syncInfo.fxaAccessToken,
+                    syncInfo.syncKey,
+                    syncInfo.tokenserverURL,
+                    error
+            )
+        }
+    }
+
+    override fun syncBookmarks(syncInfo: SyncAuthInfo) {
+        rustCall(this) { error ->
+            LibPlacesFFI.INSTANCE.sync15_bookmarks_sync(
                     this.handle.get(),
                     syncInfo.kid,
                     syncInfo.fxaAccessToken,
@@ -167,6 +180,7 @@ open class PlacesConnection internal constructor(connHandle: Long) : Interruptib
  *
  * This class is thread safe.
  */
+@Suppress("TooManyFunctions")
 open class PlacesReaderConnection internal constructor(connHandle: Long) :
         PlacesConnection(connHandle),
         ReadableHistoryConnection,
@@ -233,16 +247,36 @@ open class PlacesReaderConnection internal constructor(connHandle: Long) :
         return result
     }
 
-    override fun getVisitInfos(start: Long, end: Long): List<VisitInfo> {
+    override fun getVisitInfos(start: Long, end: Long, excludeTypes: List<VisitType>): List<VisitInfo> {
         val infoBuffer = rustCall { error ->
             LibPlacesFFI.INSTANCE.places_get_visit_infos(
-                    this.handle.get(), start, end, error)
+                    this.handle.get(), start, end, visitTransitionSet(excludeTypes), error)
         }
         try {
             val infos = MsgTypes.HistoryVisitInfos.parseFrom(infoBuffer.asCodedInputStream()!!)
             return VisitInfo.fromMessage(infos)
         } finally {
             LibPlacesFFI.INSTANCE.places_destroy_bytebuffer(infoBuffer)
+        }
+    }
+
+    override fun getVisitPage(offset: Long, count: Long, excludeTypes: List<VisitType>): List<VisitInfo> {
+        val infoBuffer = rustCall { error ->
+            LibPlacesFFI.INSTANCE.places_get_visit_page(
+                    this.handle.get(), offset, count, visitTransitionSet(excludeTypes), error)
+        }
+        try {
+            val infos = MsgTypes.HistoryVisitInfos.parseFrom(infoBuffer.asCodedInputStream()!!)
+            return VisitInfo.fromMessage(infos)
+        } finally {
+            LibPlacesFFI.INSTANCE.places_destroy_bytebuffer(infoBuffer)
+        }
+    }
+
+    override fun getVisitCount(excludeTypes: List<VisitType>): Long {
+        return rustCall { error ->
+            LibPlacesFFI.INSTANCE.places_get_visit_count(
+                    this.handle.get(), visitTransitionSet(excludeTypes), error)
         }
     }
 
@@ -301,6 +335,14 @@ open class PlacesReaderConnection internal constructor(connHandle: Long) :
             LibPlacesFFI.INSTANCE.places_destroy_bytebuffer(rustBuf)
         }
     }
+}
+
+fun visitTransitionSet(l: List<VisitType>): Int {
+    var res = 0
+    for (ty in l) {
+        res = res or (1 shl ty.type)
+    }
+    return res
 }
 
 /**
@@ -473,14 +515,24 @@ interface PlacesManager {
     fun getWriter(): WritableHistoryConnection
 
     /**
-     * Syncs the places stores.
+     * Syncs the places history store.
      *
      * Note that this function blocks until the sync is complete, which may
      * take some time due to the network etc. Because only 1 thread can be
      * using a PlacesAPI at a time, it is recommended, but not enforced, that
      * you have all connections you intend using open before calling this.
      */
-    fun sync(syncInfo: SyncAuthInfo)
+    fun syncHistory(syncInfo: SyncAuthInfo)
+
+    /**
+     * Syncs the places bookmarks store.
+     *
+     * Note that this function blocks until the sync is complete, which may
+     * take some time due to the network etc. Because only 1 thread can be
+     * using a PlacesAPI at a time, it is recommended, but not enforced, that
+     * you have all connections you intend using open before calling this.
+     */
+    fun syncBookmarks(syncInfo: SyncAuthInfo)
 }
 
 interface InterruptibleConnection : AutoCloseable {
@@ -536,7 +588,39 @@ interface ReadableHistoryConnection : InterruptibleConnection {
      * @param start The (inclusive) start time to bound the query.
      * @param end The (inclusive) end time to bound the query.
      */
-    fun getVisitInfos(start: Long, end: Long = Long.MAX_VALUE): List<VisitInfo>
+    fun getVisitInfos(
+        start: Long,
+        end: Long = Long.MAX_VALUE,
+        excludeTypes: List<VisitType> = listOf()
+    ): List<VisitInfo>
+
+    /**
+     * Return a "page" of history results. Each page will have visits in descending order
+     * with respect to their visit timestamps. In the case of ties, their row id will
+     * be used.
+     *
+     * Note that you may get surprising results if the items in the database change
+     * while you are paging through records.
+     *
+     * @param offset The offset where the page begins.
+     * @param count The number of items to return in the page.
+     * @param excludeTypes List of visit types to exclude.
+     */
+    fun getVisitPage(offset: Long, count: Long, excludeTypes: List<VisitType> = listOf()): List<VisitInfo>
+
+    /**
+     * Get the number of history visits.
+     *
+     * It is intended that this be used with `getVisitPage` to allow pagination
+     * through records, however be aware that (unless you hold the only
+     * reference to the write connection, and know a sync may not occur at this
+     * time), the number of items in the database may change between when you
+     * call `getVisitCount` and `getVisitPage`.
+     *
+     *
+     * @param excludeTypes List of visit types to exclude.
+     */
+    fun getVisitCount(excludeTypes: List<VisitType> = listOf()): Long
 }
 
 interface WritableHistoryConnection : ReadableHistoryConnection {

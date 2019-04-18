@@ -8,9 +8,19 @@ import os.path
 from build_config import module_definitions, appservices_version
 from decisionlib import *
 
+FULL_CI_TAG = '[ci full]'
+SKIP_CI_TAG = '[ci skip]'
+
 def main(task_for):
     if task_for == "github-pull-request":
-        android_linux_x86_64()
+        pr_title = os.environ["GITHUB_PR_TITLE"]
+        if SKIP_CI_TAG in pr_title:
+            print("CI skip requested, exiting.")
+            exit(0)
+        elif FULL_CI_TAG in pr_title:
+            android_multiarch()
+        else:
+            android_linux_x86_64()
     elif task_for == "github-push":
         android_multiarch()
     elif task_for == "github-release":
@@ -125,10 +135,11 @@ def ktlint_detekt():
 def android_linux_x86_64():
     ktlint_detekt()
     libs_tasks = libs_for("android", "desktop_linux", "desktop_macos", "desktop_win32_x86_64")
-    return (
+    task = (
         android_task("Build and test (Android - linux-x86-64)", libs_tasks)
         .with_script("""
-            echo "rust.targets=linux-x86-64" > local.properties
+            echo "rust.targets=linux-x86-64,x86_64\n" > local.properties
+            echo "application-services.nonmegazord-profile=debug" >> local.properties
         """)
         .with_script("""
             yes | sdkmanager --update
@@ -136,16 +147,25 @@ def android_linux_x86_64():
             ./gradlew --no-daemon clean
             ./gradlew --no-daemon testDebug
         """)
-        .create()
     )
+    for module_info in module_definitions():
+        module = module_info['name']
+        if module.endswith("-megazord"):
+            task.with_script("./automation/check_megazord.sh {}".format(module[0:-9].replace("-", "_")))
+    return task.create()
 
 def gradle_module_task_name(module, gradle_task_name):
     return ":%s:%s" % (module, gradle_task_name)
 
 def gradle_module_task(libs_tasks, module_info, is_release):
     module = module_info['name']
-    task = (
-        android_task("{} - Build and test".format(module), libs_tasks)
+    task = android_task("{} - Build and test".format(module), libs_tasks)
+    # This is important as by default the Rust plugin will only cross-compile for Android + host platform.
+    task.with_script('echo "rust.targets=arm,arm64,x86_64,x86,darwin,linux-x86-64,win32-x86-64-gnu\n" > local.properties')
+    if not is_release: # Makes builds way faster.
+        task.with_script('echo "application-services.nonmegazord-profile=debug" >> local.properties')
+    (
+        task
         .with_script("""
             yes | sdkmanager --update
             yes | sdkmanager --licenses
@@ -284,6 +304,7 @@ def linux_cross_compile_build_task(name):
             # Rust requires dsymutil on the PATH: https://github.com/rust-lang/rust/issues/52728.
             export PATH=$PATH:/tmp/clang/bin
 
+            export ORG_GRADLE_PROJECT_RUST_ANDROID_GRADLE_TARGET_X86_64_APPLE_DARWIN_NSS_DIR=/build/repo/libs/desktop/darwin/nss
             export ORG_GRADLE_PROJECT_RUST_ANDROID_GRADLE_TARGET_X86_64_APPLE_DARWIN_SQLCIPHER_LIB_DIR=/build/repo/libs/desktop/darwin/sqlcipher/lib
             export ORG_GRADLE_PROJECT_RUST_ANDROID_GRADLE_TARGET_X86_64_APPLE_DARWIN_OPENSSL_DIR=/build/repo/libs/desktop/darwin/openssl
             export ORG_GRADLE_PROJECT_RUST_ANDROID_GRADLE_TARGET_X86_64_APPLE_DARWIN_CC=/tmp/clang/bin/clang

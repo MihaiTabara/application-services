@@ -7,6 +7,7 @@ license = "MPL-2.0"
 
 [features]
 log_query_plans = ["sql-support/log_query_plans"]
+reqwest = ["sync15/reqwest"]
 default = []
 
 [dependencies]
@@ -29,9 +30,10 @@ prost = "0.5.0"
 prost-derive = "0.5.0"
 bytes = "0.4.11"
 dogear = "0.2.2"
+interrupt = { path = "../support/interrupt" }
 
 [dependencies.rusqlite]
-version = "0.16.0"
+version = "0.17.0"
 features = ["sqlcipher", "functions"]
 
 [dev-dependencies]
@@ -47,6 +49,8 @@ criterion = "0.2.9"
 tempdir = "0.3.7"
 cli-support = { path = "../support/cli" }
 pretty_assertions = "0.6.1"
+force-viaduct-reqwest = { path = "../support/force-viaduct-reqwest" }
+ctrlc = "3.1.1"
 
 [build-dependencies]
 prost-build = "0.5.0"

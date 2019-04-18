@@ -3,7 +3,10 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #![allow(unknown_lints)]
-
+#![warn(rust_2018_idioms)]
+// Let's allow these in the FFI code, since it's usually just a coincidence if
+// the closure is small.
+#![allow(clippy::redundant_closure)]
 use ffi_support::{
     define_bytebuffer_destructor, define_handle_map_deleter, define_string_destructor, ByteBuffer,
     ConcurrentHandleMap, ExternError, FfiStr,

@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use failure::{self, Backtrace, Context, Fail, SyncFailure};
+use interrupt::Interrupted;
 use std::boxed::Box;
 use std::time::SystemTime;
 use std::{fmt, result, string};
@@ -14,7 +15,7 @@ pub struct Error(Box<Context<ErrorKind>>);
 
 impl Fail for Error {
     #[inline]
-    fn cause(&self) -> Option<&Fail> {
+    fn cause(&self) -> Option<&dyn Fail> {
         self.0.cause()
     }
 
@@ -26,7 +27,7 @@ impl Fail for Error {
 
 impl fmt::Display for Error {
     #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&*self.0, f)
     }
 }
@@ -82,12 +83,6 @@ pub enum ErrorKind {
     #[fail(display = "Server requested backoff. Retry after {:?}", _0)]
     BackoffError(SystemTime),
 
-    #[fail(display = "No meta/global record is present on the server")]
-    NoMetaGlobal,
-
-    #[fail(display = "Have not fetched crypto/keys yet, or the keys are not present")]
-    NoCryptoKeys,
-
     #[fail(display = "Outgoing record is too large to upload")]
     RecordTooLargeError,
 
@@ -112,14 +107,19 @@ pub enum ErrorKind {
     #[fail(display = "Unexpected server behavior during batch upload: {}", _0)]
     ServerBatchProblem(&'static str),
 
-    #[fail(display = "Setup state machine cycle detected")]
-    SetupStateCycleError,
+    #[fail(
+        display = "It appears some other client is also trying to setup storage; try again later"
+    )]
+    SetupRace,
 
     #[fail(display = "Client upgrade required; server storage version too new")]
     ClientUpgradeRequired,
 
-    #[fail(display = "Setup state machine disallowed state {}", _0)]
-    DisallowedStateError(&'static str),
+    // This means that our global state machine needs to enter a state (such as
+    // "FreshStartNeeded", but the allowed_states don't include that state.)
+    // It typically means we are trying to do a "fast" or "read-only" sync.
+    #[fail(display = "Our storage needs setting up and we can't currently do it")]
+    SetupRequired,
 
     #[fail(display = "Store error: {}", _0)]
     StoreError(#[fail(cause)] failure::Error),
@@ -148,6 +148,9 @@ pub enum ErrorKind {
 
     #[fail(display = "URL parse error: {}", _0)]
     MalformedUrl(#[fail(cause)] url::ParseError),
+
+    #[fail(display = "The operation was interrupted.")]
+    Interrupted(#[fail(cause)] Interrupted),
 }
 
 macro_rules! impl_from_error {
@@ -177,7 +180,8 @@ impl_from_error! {
     (UnexpectedStatus, viaduct::UnexpectedStatus),
     (MalformedUrl, url::ParseError),
     // A bit dubious, since we only want this to happen inside `synchronize`
-    (StoreError, ::failure::Error)
+    (StoreError, ::failure::Error),
+    (Interrupted, Interrupted)
 }
 
 // ::hawk::Error uses error_chain, and so it's not trivially compatible with failure.

@@ -4,12 +4,17 @@
 
 use crate::storage::bookmarks::BookmarkRootGuid;
 use dogear;
+use failure::Fail;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use rusqlite::Result as RusqliteResult;
 use serde::ser::{Serialize, Serializer};
 use serde_derive::*;
+use std::convert::TryFrom;
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+mod visit_transition_set;
+pub use visit_transition_set::VisitTransitionSet;
 
 // XXX - copied from logins - surprised it's not in `sync`
 #[derive(PartialEq, Eq, Hash, Clone, Debug, Serialize, Deserialize)]
@@ -52,20 +57,20 @@ impl From<SyncGuid> for dogear::Guid {
 }
 
 impl ToSql for SyncGuid {
-    fn to_sql(&self) -> RusqliteResult<ToSqlOutput> {
+    fn to_sql(&self) -> RusqliteResult<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::from(self.0.clone())) // cloning seems wrong?
     }
 }
 
 impl FromSql for SyncGuid {
-    fn column_result(value: ValueRef) -> FromSqlResult<Self> {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         value.as_str().map(|v| SyncGuid(v.to_string()))
     }
 }
 
 impl fmt::Display for SyncGuid {
     #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
@@ -127,26 +132,31 @@ impl From<u64> for Timestamp {
 
 impl fmt::Display for Timestamp {
     #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
 impl ToSql for Timestamp {
-    fn to_sql(&self) -> RusqliteResult<ToSqlOutput> {
+    fn to_sql(&self) -> RusqliteResult<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::from(self.0 as i64)) // hrm - no u64 in rusqlite
     }
 }
 
 impl FromSql for Timestamp {
-    fn column_result(value: ValueRef) -> FromSqlResult<Self> {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         value.as_i64().map(|v| Timestamp(v as u64)) // hrm - no u64
     }
 }
 
+#[derive(Fail, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[fail(display = "Invalid visit type")]
+pub struct InvalidVisitType;
+
 // NOTE: These discriminator values are the same as those used by Desktop
 // Firefox and are what is written to the database. We also duplicate them
-// in the android lib as constants on PlacesConnection.
+// in the android lib as constants on PlacesConnection, and in a couple
+// constants in visit_transition_set.rs
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum VisitTransition {
@@ -168,7 +178,7 @@ pub enum VisitTransition {
 }
 
 impl ToSql for VisitTransition {
-    fn to_sql(&self) -> RusqliteResult<ToSqlOutput> {
+    fn to_sql(&self) -> RusqliteResult<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::from(*self as u8))
     }
 }
@@ -190,12 +200,19 @@ impl VisitTransition {
     }
 }
 
+impl TryFrom<u8> for VisitTransition {
+    type Error = InvalidVisitType;
+    fn try_from(p: u8) -> Result<Self, Self::Error> {
+        VisitTransition::from_primitive(p).ok_or(InvalidVisitType)
+    }
+}
+
 struct VisitTransitionSerdeVisitor;
 
 impl<'de> serde::de::Visitor<'de> for VisitTransitionSerdeVisitor {
     type Value = VisitTransition;
 
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("positive integer representing VisitTransition")
     }
 
@@ -235,7 +252,7 @@ pub enum BookmarkType {
 }
 
 impl FromSql for BookmarkType {
-    fn column_result(value: ValueRef) -> FromSqlResult<Self> {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         let v = value.as_i64()?;
         if v < 0 || v > i64::from(u8::max_value()) {
             return Err(FromSqlError::OutOfRange(v));
@@ -272,7 +289,7 @@ impl BookmarkType {
 }
 
 impl ToSql for BookmarkType {
-    fn to_sql(&self) -> RusqliteResult<ToSqlOutput> {
+    fn to_sql(&self) -> RusqliteResult<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::from(*self as u8))
     }
 }
@@ -320,7 +337,7 @@ impl SyncStatus {
 }
 
 impl ToSql for SyncStatus {
-    fn to_sql(&self) -> RusqliteResult<ToSqlOutput> {
+    fn to_sql(&self) -> RusqliteResult<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::from(*self as u8))
     }
 }

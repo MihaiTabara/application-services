@@ -16,11 +16,9 @@ import org.gradle.api.artifacts.DependencySubstitutions
 import org.gradle.api.artifacts.ModuleIdentifier
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.gradle.api.artifacts.component.ModuleComponentSelector
-import org.gradle.api.artifacts.repositories.MavenArtifactRepository
 import org.gradle.api.internal.artifacts.DefaultModuleIdentifier
 import org.gradle.api.logging.Logger
 import org.gradle.api.logging.Logging
-import java.net.URI
 
 open class AppServicesPlugin : Plugin<Project> {
     internal lateinit var appServicesExtension: AppServicesExtension

@@ -51,13 +51,13 @@ impl BrowserIDKeyPair for RSABrowserIDKeyPair {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>> {
         let mut signer = Signer::new(MessageDigest::sha256(), &self.key)?;
         signer.update(message)?;
-        signer.sign_to_vec().map_err(|e| e.into())
+        signer.sign_to_vec().map_err(Into::into)
     }
 
     fn verify_message(&self, message: &[u8], signature: &[u8]) -> Result<bool> {
         let mut verifier = Verifier::new(MessageDigest::sha256(), &self.key)?;
         verifier.update(message)?;
-        verifier.verify(signature).map_err(|e| e.into())
+        verifier.verify(signature).map_err(Into::into)
     }
 
     fn to_json(&self, include_private: bool) -> Result<serde_json::Value> {
@@ -83,7 +83,7 @@ impl Clone for RSABrowserIDKeyPair {
 }
 
 impl fmt::Debug for RSABrowserIDKeyPair {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<rsa_key_pair>")
     }
 }
@@ -168,7 +168,7 @@ impl<'de> Deserialize<'de> for RSABrowserIDKeyPair {
                 impl<'de> Visitor<'de> for FieldVisitor {
                     type Value = Field;
 
-                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                         formatter.write_str("`n`, `e`, `d`, `p`, `q`, `dmp1`, `dmq1`, `iqmp`")
                     }
 
@@ -199,7 +199,7 @@ impl<'de> Deserialize<'de> for RSABrowserIDKeyPair {
         impl<'de> Visitor<'de> for RSABrowserIDKeyPairVisitor {
             type Value = RSABrowserIDKeyPair;
 
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("struct RSABrowserIDKeyPair")
             }
             #[allow(clippy::many_single_char_names)] // FIXME

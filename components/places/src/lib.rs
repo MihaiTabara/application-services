@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #![allow(unknown_lints)]
+#![warn(rust_2018_idioms)]
 
 pub mod api;
 pub mod error;
@@ -32,7 +33,7 @@ pub use crate::api::apply_observation;
 pub use crate::api::places_api::test;
 pub use crate::api::places_api::{ConnectionType, PlacesApi};
 
-pub use crate::db::{PlacesDb, PlacesInterruptHandle};
+pub use crate::db::PlacesDb;
 pub use crate::error::*;
 pub use crate::observation::VisitObservation;
 pub use crate::storage::PageInfo;

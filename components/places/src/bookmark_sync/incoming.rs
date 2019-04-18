@@ -16,6 +16,7 @@ use crate::storage::{
 use crate::types::SyncGuid;
 use rusqlite::Connection;
 use sql_support::{self, ConnExt};
+use std::iter;
 use sync15::ServerTimestamp;
 use url::Url;
 
@@ -92,7 +93,7 @@ impl<'a> IncomingApplicator<'a> {
                       )"#,
             &[
                 (":guid", &b.record_id.as_guid().as_ref()),
-                (":parentGuid", &b.parent_record_id.as_ref().map(|id| id.as_guid())),
+                (":parentGuid", &b.parent_record_id.as_ref().map(BookmarkRecordId::as_guid)),
                 (":serverModified", &(modified.as_millis() as i64)),
                 (":kind", &SyncedBookmarkKind::Bookmark),
                 (":dateAdded", &b.date_added),
@@ -136,24 +137,45 @@ impl<'a> IncomingApplicator<'a> {
                       :dateAdded, NULLIF(:title, ""))"#,
             &[
                 (":guid", &f.record_id.as_guid().as_ref()),
-                (":parentGuid", &f.parent_record_id.as_ref().map(|id| id.as_guid())),
+                (":parentGuid", &f.parent_record_id.as_ref().map(BookmarkRecordId::as_guid)),
                 (":serverModified", &(modified.as_millis() as i64)),
                 (":kind", &SyncedBookmarkKind::Folder),
                 (":dateAdded", &f.date_added),
                 (":title", &maybe_truncate_title(&f.title)),
             ],
         )?;
-        for (position, child_guid) in f.children.iter().enumerate() {
-            self.db.execute_named_cached(
-                "INSERT INTO moz_bookmarks_synced_structure(guid, parentGuid, position)
-                 VALUES(:guid, :parentGuid, :position)",
-                &[
-                    (":guid", &child_guid.as_guid().as_ref()),
-                    (":parentGuid", &f.record_id.as_guid().as_ref()),
-                    (":position", &(position as i64)),
-                ],
-            )?;
-        }
+        sql_support::each_sized_chunk(
+            &f.children,
+            // -1 because we want to leave an extra binding parameter (`?1`)
+            // for the folder's GUID.
+            sql_support::default_max_variable_number() - 1,
+            |chunk, offset| -> Result<()> {
+                let sql = format!(
+                    "INSERT INTO moz_bookmarks_synced_structure(guid, parentGuid, position)
+                     VALUES {}",
+                    // Builds a fragment like `(?2, ?1, 0), (?3, ?1, 1), ...`,
+                    // where ?1 is the folder's GUID, [?2, ?3] are the first and
+                    // second child GUIDs (SQLite binding parameters index
+                    // from 1), and [0, 1] are the positions. This lets us store
+                    // the folder's children using as few statements as
+                    // possible.
+                    sql_support::repeat_display(chunk.len(), ",", |index, f| {
+                        // Each child's position is its index in `f.children`;
+                        // that is, the `offset` of the current chunk, plus the
+                        // child's `index` within the chunk.
+                        let position = offset + index;
+                        write!(f, "(?{}, ?1, {})", index + 2, position)
+                    })
+                );
+                self.db.execute(
+                    &sql,
+                    iter::once(&f.record_id)
+                        .chain(chunk.iter())
+                        .map(|record_id| record_id.as_guid().as_ref()),
+                )?;
+                Ok(())
+            },
+        )?;
         Ok(())
     }
 
@@ -261,13 +283,13 @@ impl<'a> IncomingApplicator<'a> {
                      )"#,
             &[
                 (":guid", &q.record_id.as_guid().as_ref()),
-                (":parentGuid", &q.parent_record_id.as_ref().map(|id| id.as_guid())),
+                (":parentGuid", &q.parent_record_id.as_ref().map(BookmarkRecordId::as_guid)),
                 (":serverModified", &(modified.as_millis() as i64)),
                 (":kind", &SyncedBookmarkKind::Query),
                 (":dateAdded", &q.date_added),
                 (":title", &maybe_truncate_title(&q.title)),
                 (":validity", &validity),
-                (":url", &url.map(|u| u.into_string()))
+                (":url", &url.map(Url::into_string))
             ],
         )?;
         Ok(())
@@ -320,7 +342,7 @@ impl<'a> IncomingApplicator<'a> {
                 (":guid", &l.record_id.as_guid().as_ref()),
                 (
                     ":parentGuid",
-                    &l.parent_record_id.as_ref().map(|id| id.as_guid()),
+                    &l.parent_record_id.as_ref().map(BookmarkRecordId::as_guid),
                 ),
                 (":serverModified", &(modified.as_millis() as i64)),
                 (":kind", &SyncedBookmarkKind::Livemark),
@@ -344,7 +366,7 @@ impl<'a> IncomingApplicator<'a> {
                 (":guid", &s.record_id.as_guid().as_ref()),
                 (
                     ":parentGuid",
-                    &s.parent_record_id.as_ref().map(|id| id.as_guid()),
+                    &s.parent_record_id.as_ref().map(BookmarkRecordId::as_guid),
                 ),
                 (":serverModified", &(modified.as_millis() as i64)),
                 (":kind", &SyncedBookmarkKind::Separator),
@@ -386,8 +408,7 @@ impl<'a> IncomingApplicator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::places_api::{test::new_mem_api, ConnectionType};
-    use crate::db::PlacesDb;
+    use crate::api::places_api::{test::new_mem_api, PlacesApi, SyncConn};
     use crate::storage::bookmarks::BookmarkRootGuid;
 
     use crate::bookmark_sync::tests::SyncedBookmarkItem;
@@ -395,11 +416,8 @@ mod tests {
     use serde_json::{json, Value};
     use sync15::Payload;
 
-    fn apply_incoming(records_json: Value) -> PlacesDb {
-        let api = new_mem_api();
-        let conn = api
-            .open_connection(ConnectionType::Sync)
-            .expect("should get a connection");
+    fn apply_incoming(api: &PlacesApi, records_json: Value) -> SyncConn<'_> {
+        let conn = api.open_sync_connection().expect("should get a connection");
 
         let server_timestamp = ServerTimestamp(0.0);
         let applicator = IncomingApplicator::new(&conn);
@@ -430,7 +448,8 @@ mod tests {
             .as_str()
             .expect("id must be a string")
             .to_string();
-        let conn = apply_incoming(record_json);
+        let api = new_mem_api();
+        let conn = apply_incoming(&api, record_json);
         let got = SyncedBookmarkItem::get(&conn, &guid.into())
             .expect("should work")
             .expect("item should exist");
@@ -459,6 +478,35 @@ mod tests {
                 .url(Some("http://example.com/a"))
                 .tags(vec!["foo".into(), "bar".into()])
                 .keyword(Some("baz")),
+        );
+    }
+
+    #[test]
+    fn test_apply_folder() {
+        let children = (1..sql_support::default_max_variable_number() * 2)
+            .map(|i| SyncGuid(format!("{:A>12}", i)))
+            .collect::<Vec<_>>();
+        let value = serde_json::to_value(BookmarkItemRecord::from(FolderRecord {
+            record_id: BookmarkRecordId::from_payload_id("folderAAAAAA".into()),
+            parent_record_id: Some(BookmarkRecordId::from_payload_id("unfiled".into())),
+            parent_title: Some("unfiled".into()),
+            date_added: Some(0),
+            has_dupe: true,
+            title: Some("A".into()),
+            children: children
+                .iter()
+                .map(|guid| BookmarkRecordId::from(guid.clone()))
+                .collect(),
+        }))
+        .expect("Should serialize folder with children");
+        assert_incoming_creates_mirror_item(
+            value,
+            &SyncedBookmarkItem::new()
+                .validity(SyncedBookmarkValidity::Valid)
+                .kind(SyncedBookmarkKind::Folder)
+                .parent_guid(Some(&BookmarkRootGuid::Unfiled.as_guid()))
+                .title(Some("A"))
+                .children(children),
         );
     }
 

@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::msg_types::BookmarkNode as ProtoBookmark;
+use sql_support::SqlInterruptScope;
 
 /// This type basically exists to become a msg_types::BookmarkNode, but is
 /// slightly less of a pain to deal with in rust.
@@ -92,7 +93,7 @@ pub fn fetch_bookmark(
     item_guid: &SyncGuid,
     get_direct_children: bool,
 ) -> Result<Option<PublicNode>> {
-    let _tx = db.unchecked_transaction()?;
+    let _tx = db.begin_transaction()?;
     let scope = db.begin_interrupt_scope();
     let bookmark = fetch_bookmark_in_tx(db, item_guid, get_direct_children, &scope)?;
     // Note: We let _tx drop (which means it does a rollback) since it doesn't
@@ -107,7 +108,7 @@ fn get_child_guids(db: &PlacesDb, parent: RowId) -> Result<Vec<SyncGuid>> {
          WHERE parent = :parent
          ORDER BY position ASC",
         &[(":parent", &parent)],
-        |row| row.get_checked(0),
+        |row| row.get(0),
     )?)
 }
 
@@ -131,7 +132,7 @@ fn fetch_bookmark_child_info(
     db: &PlacesDb,
     parent: &RawBookmark,
     get_direct_children: bool,
-    scope: &crate::db::InterruptScope,
+    scope: &SqlInterruptScope,
 ) -> Result<ChildInfo> {
     if parent.bookmark_type != BookmarkType::Folder {
         return Ok(ChildInfo::NoChildren);
@@ -175,7 +176,7 @@ fn fetch_bookmark_in_tx(
     db: &PlacesDb,
     item_guid: &SyncGuid,
     get_direct_children: bool,
-    scope: &crate::db::InterruptScope,
+    scope: &SqlInterruptScope,
 ) -> Result<Option<PublicNode>> {
     let rb = if let Some(raw) = get_raw_bookmark(db, item_guid)? {
         raw
@@ -196,11 +197,11 @@ fn fetch_bookmark_in_tx(
 pub fn update_bookmark_from_message(db: &PlacesDb, msg: ProtoBookmark) -> Result<()> {
     let info = conversions::BookmarkUpdateInfo::from(msg);
 
-    let tx = db.unchecked_transaction()?;
+    let tx = db.begin_transaction()?;
     let node_type: BookmarkType = db.query_row_and_then_named(
         "SELECT type FROM moz_bookmarks WHERE guid = :guid",
         &[(":guid", &info.guid)],
-        |r| r.get_checked(0),
+        |r| r.get(0),
         true,
     )?;
     let (guid, updatable) = info.into_updatable(node_type)?;
@@ -214,7 +215,7 @@ pub fn update_bookmark_from_message(db: &PlacesDb, msg: ProtoBookmark) -> Result
 /// requested item's position and parent info are provided as well. This is the
 /// function called by the FFI when requesting the tree.
 pub fn fetch_public_tree(db: &PlacesDb, item_guid: &SyncGuid) -> Result<Option<PublicNode>> {
-    let _tx = db.unchecked_transaction()?;
+    let _tx = db.begin_transaction()?;
     let tree = if let Some(tree) = fetch_tree(db, item_guid)? {
         tree
     } else {
@@ -238,12 +239,7 @@ pub fn fetch_public_tree(db: &PlacesDb, item_guid: &SyncGuid) -> Result<Option<P
         let (parent_guid, position) = db.query_row_and_then_named(
             sql,
             &[(":guid", &item_guid)],
-            |row| -> Result<_> {
-                Ok((
-                    row.get_checked::<_, Option<SyncGuid>>(0)?,
-                    row.get_checked::<_, u32>(1)?,
-                ))
-            },
+            |row| -> Result<_> { Ok((row.get::<_, Option<SyncGuid>>(0)?, row.get::<_, u32>(1)?)) },
             true,
         )?;
         proto.parent_guid = parent_guid;
@@ -261,14 +257,14 @@ pub fn search_bookmarks(db: &PlacesDb, search: &str, limit: u32) -> Result<Vec<P
             scope.err_if_interrupted()?;
             Ok(PublicNode {
                 node_type: BookmarkType::Bookmark,
-                guid: row.get_checked("guid")?,
-                parent_guid: row.get_checked("parentGuid")?,
-                position: row.get_checked("position")?,
-                date_added: row.get_checked("dateAdded")?,
-                last_modified: row.get_checked("lastModified")?,
-                title: row.get_checked("title")?,
+                guid: row.get("guid")?,
+                parent_guid: row.get("parentGuid")?,
+                position: row.get("position")?,
+                date_added: row.get("dateAdded")?,
+                last_modified: row.get("lastModified")?,
+                title: row.get("title")?,
                 url: row
-                    .get_checked::<_, Option<String>>("url")?
+                    .get::<_, Option<String>>("url")?
                     .map(|href| url::Url::parse(&href))
                     .transpose()?,
                 child_guids: None,

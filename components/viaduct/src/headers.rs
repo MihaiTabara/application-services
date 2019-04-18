@@ -85,7 +85,7 @@ impl Header {
 }
 
 impl std::fmt::Display for Header {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.name, self.value)
     }
 }
@@ -282,9 +282,8 @@ impl Headers {
         T: FromStr,
         S: PartialEq<HeaderName>,
     {
-        self.get(name).map(|val| val.parse::<T>())
+        self.get(name).map(str::parse)
     }
-
     /// Get the value of the header with the provided name, and
     /// attempt to parse it using [`std::str::FromStr`].
     ///
@@ -377,7 +376,7 @@ pub mod consts {
         // non-standard, but it's convenient to have these.
         (RETRY_AFTER, "retry-after"),
         (X_IF_UNMODIFIED_SINCE, "x-if-unmodified-since"),
-        (X_KEY_ID, "x-key-id"),
+        (X_KEYID, "x-keyid"),
         (X_LAST_MODIFIED, "x-last-modified"),
         (X_TIMESTAMP, "x-timestamp"),
         (X_WEAVE_NEXT_OFFSET, "x-weave-next-offset"),

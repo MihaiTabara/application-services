@@ -3,21 +3,19 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #![allow(unknown_lints)]
+#![warn(rust_2018_idioms)]
 
 use ffi_support::{
     define_bytebuffer_destructor, define_handle_map_deleter, define_string_destructor,
     ConcurrentHandleMap, ExternError, FfiStr,
 };
 use std::os::raw::c_char;
-// use sync15::telemetry;
 
-use base64;
-use lazy_static;
 use serde_json::{self, json};
 
-use config::PushConfiguration;
-use push_errors::{self, Result};
-use subscriber::PushManager;
+use push::config::PushConfiguration;
+use push::error::Result;
+use push::subscriber::PushManager;
 
 #[no_mangle]
 pub extern "C" fn push_enable_logcat_logging() {
@@ -50,7 +48,7 @@ pub extern "C" fn push_connection_new(
     error: &mut ExternError,
 ) -> u64 {
     MANAGER.insert_with_result(error, || {
-        log::debug!(
+        log::trace!(
             "push_connection_new {:?} {:?} -> {:?} {:?}=>{:?}",
             http_protocol,
             server_host,
@@ -95,17 +93,21 @@ pub extern "C" fn push_subscribe(
         // Don't auto add the subscription to the db.
         // (endpoint updates also call subscribe and should be lighter weight)
         let (info, subscription_key) = mgr.subscribe(channel, scope_s)?;
-        // store the channelid => auth + subscription_key
-        let subscription_info = json!({
-            "endpoint": info.endpoint,
-            "keys": {
-                "auth": base64::encode_config(&subscription_key.auth,
-                                              base64::URL_SAFE_NO_PAD),
-                "p256dh": base64::encode_config(&subscription_key.public,
-                                                base64::URL_SAFE_NO_PAD)
+        // it is possible for the
+        // store the channel_id => auth + subscription_key
+        let subscription_response = json!({
+            "channel_id": info.channel_id,
+            "subscription_info": {
+                "endpoint": info.endpoint,
+                "keys": {
+                    "auth": base64::encode_config(&subscription_key.auth,
+                                                  base64::URL_SAFE_NO_PAD),
+                    "p256dh": base64::encode_config(&subscription_key.public,
+                                                    base64::URL_SAFE_NO_PAD)
+                }
             }
         });
-        Ok(subscription_info.to_string())
+        Ok(subscription_response.to_string())
     })
 }
 
@@ -134,8 +136,8 @@ pub extern "C" fn push_update(handle: u64, new_token: FfiStr<'_>, error: &mut Ex
 }
 
 // verify connection using channel list
-// Returns a JSON containing the new channelids => endpoints
-// NOTE: AC should notify processes associated with channelIDs of new endpoint
+// Returns a JSON containing the new channel_ids => endpoints
+// NOTE: AC should notify processes associated with channel_ids of new endpoint
 #[no_mangle]
 pub extern "C" fn push_verify_connection(handle: u64, error: &mut ExternError) -> *mut c_char {
     log::debug!("push_verify");
@@ -144,7 +146,7 @@ pub extern "C" fn push_verify_connection(handle: u64, error: &mut ExternError) -
             let new_endpoints = mgr.regenerate_endpoints()?;
             if !new_endpoints.is_empty() {
                 return serde_json::to_string(&new_endpoints).map_err(|e| {
-                    push_errors::ErrorKind::TranscodingError(format!("{:?}", e)).into()
+                    push::error::ErrorKind::TranscodingError(format!("{:?}", e)).into()
                 });
             }
         }
@@ -200,4 +202,3 @@ pub extern "C" fn push_dispatch_for_chid(
 define_string_destructor!(push_destroy_string);
 define_bytebuffer_destructor!(push_destroy_buffer);
 define_handle_map_deleter!(MANAGER, push_connection_destroy);
-// define_box_destructor!(PlacesInterruptHandle, places_interrupt_handle_destroy);

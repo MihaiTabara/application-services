@@ -5,8 +5,8 @@
 // We don't want 'db.rs' as a sub-module. We could move the contents here? Or something else?
 #[allow(clippy::module_inception)] // FIXME
 pub mod db;
-mod interrupt;
 mod schema;
-pub(crate) use self::interrupt::InterruptScope;
-pub use self::interrupt::PlacesInterruptHandle;
+mod tx;
+pub use self::tx::PlacesTransaction;
+
 pub use crate::db::db::PlacesDb;

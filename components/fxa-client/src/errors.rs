@@ -14,7 +14,7 @@ pub struct Error(Box<Context<ErrorKind>>);
 
 impl Fail for Error {
     #[inline]
-    fn cause(&self) -> Option<&Fail> {
+    fn cause(&self) -> Option<&dyn Fail> {
         self.0.cause()
     }
 
@@ -26,7 +26,7 @@ impl Fail for Error {
 
 impl fmt::Display for Error {
     #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&*self.0, f)
     }
 }
@@ -135,6 +135,9 @@ pub enum ErrorKind {
         info: String,
     },
 
+    #[fail(display = "Crypto/NSS error: {}", _0)]
+    CryptoError(#[fail(cause)] rc_crypto::Error),
+
     // Basically reimplement error_chain's foreign_links. (Ugh, this sucks)
     #[fail(display = "Hex decode error: {}", _0)]
     HexDecodeError(#[fail(cause)] hex::FromHexError),
@@ -188,6 +191,7 @@ macro_rules! impl_from_error {
 }
 
 impl_from_error! {
+    (CryptoError, ::rc_crypto::Error),
     (HexDecodeError, ::hex::FromHexError),
     (Base64Decode, ::base64::DecodeError),
     (JsonError, ::serde_json::Error),

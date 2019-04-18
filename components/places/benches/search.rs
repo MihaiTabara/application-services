@@ -1,4 +1,5 @@
 #![allow(unknown_lints)]
+#![warn(rust_2018_idioms)]
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use places::api::{
@@ -45,9 +46,17 @@ pub struct TestDb {
 
 impl TestDb {
     pub fn new() -> Rc<Self> {
+        use std::sync::{Arc, Mutex};
         let dir = TempDir::new("placesbench").unwrap();
         let file = dir.path().join("places.sqlite");
-        let mut db = PlacesDb::open(&file, None, ConnectionType::ReadWrite, 0).unwrap();
+        let mut db = PlacesDb::open(
+            &file,
+            None,
+            ConnectionType::ReadWrite,
+            0,
+            Arc::new(Mutex::new(())),
+        )
+        .unwrap();
         println!("Populating test database...");
         init_db(&mut db).unwrap();
         println!("Done populating test db");

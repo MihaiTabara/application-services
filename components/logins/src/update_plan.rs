@@ -6,6 +6,7 @@ use crate::error::*;
 use crate::login::{LocalLogin, Login, MirrorLogin, SyncStatus};
 use crate::util;
 use rusqlite::{types::ToSql, Connection};
+use sql_support::SqlInterruptScope;
 use std::time::SystemTime;
 use sync15::ServerTimestamp;
 
@@ -71,7 +72,7 @@ impl UpdatePlan {
             .push((login, time.as_millis() as i64, is_override));
     }
 
-    fn perform_deletes(&self, conn: &Connection) -> Result<()> {
+    fn perform_deletes(&self, conn: &Connection, scope: &SqlInterruptScope) -> Result<()> {
         sql_support::each_chunk(&self.delete_local, |chunk, _| -> Result<()> {
             conn.execute(
                 &format!(
@@ -80,6 +81,7 @@ impl UpdatePlan {
                 ),
                 chunk,
             )?;
+            scope.err_if_interrupted()?;
             Ok(())
         })?;
 
@@ -96,7 +98,7 @@ impl UpdatePlan {
     }
 
     // These aren't batched but probably should be.
-    fn perform_mirror_updates(&self, conn: &Connection) -> Result<()> {
+    fn perform_mirror_updates(&self, conn: &Connection, scope: &SqlInterruptScope) -> Result<()> {
         let sql = "
             UPDATE loginsM
             SET server_modified = :server_modified,
@@ -118,28 +120,29 @@ impl UpdatePlan {
         for (login, timestamp) in &self.mirror_updates {
             log::trace!("Updating mirror {:?}", login.guid_str());
             stmt.execute_named(&[
-                (":server_modified", timestamp as &ToSql),
-                (":http_realm", &login.http_realm as &ToSql),
-                (":form_submit_url", &login.form_submit_url as &ToSql),
-                (":username_field", &login.username_field as &ToSql),
-                (":password_field", &login.password_field as &ToSql),
-                (":password", &login.password as &ToSql),
-                (":hostname", &login.hostname as &ToSql),
-                (":username", &login.username as &ToSql),
-                (":times_used", &login.times_used as &ToSql),
-                (":time_last_used", &login.time_last_used as &ToSql),
+                (":server_modified", timestamp as &dyn ToSql),
+                (":http_realm", &login.http_realm as &dyn ToSql),
+                (":form_submit_url", &login.form_submit_url as &dyn ToSql),
+                (":username_field", &login.username_field as &dyn ToSql),
+                (":password_field", &login.password_field as &dyn ToSql),
+                (":password", &login.password as &dyn ToSql),
+                (":hostname", &login.hostname as &dyn ToSql),
+                (":username", &login.username as &dyn ToSql),
+                (":times_used", &login.times_used as &dyn ToSql),
+                (":time_last_used", &login.time_last_used as &dyn ToSql),
                 (
                     ":time_password_changed",
-                    &login.time_password_changed as &ToSql,
+                    &login.time_password_changed as &dyn ToSql,
                 ),
-                (":time_created", &login.time_created as &ToSql),
-                (":guid", &login.guid_str() as &ToSql),
+                (":time_created", &login.time_created as &dyn ToSql),
+                (":guid", &login.guid_str() as &dyn ToSql),
             ])?;
+            scope.err_if_interrupted()?;
         }
         Ok(())
     }
 
-    fn perform_mirror_inserts(&self, conn: &Connection) -> Result<()> {
+    fn perform_mirror_inserts(&self, conn: &Connection, scope: &SqlInterruptScope) -> Result<()> {
         let sql = "
             INSERT OR IGNORE INTO loginsM (
                 is_overridden,
@@ -183,29 +186,30 @@ impl UpdatePlan {
         for (login, timestamp, is_overridden) in &self.mirror_inserts {
             log::trace!("Inserting mirror {:?}", login.guid_str());
             stmt.execute_named(&[
-                (":is_overridden", is_overridden as &ToSql),
-                (":server_modified", timestamp as &ToSql),
-                (":http_realm", &login.http_realm as &ToSql),
-                (":form_submit_url", &login.form_submit_url as &ToSql),
-                (":username_field", &login.username_field as &ToSql),
-                (":password_field", &login.password_field as &ToSql),
-                (":password", &login.password as &ToSql),
-                (":hostname", &login.hostname as &ToSql),
-                (":username", &login.username as &ToSql),
-                (":times_used", &login.times_used as &ToSql),
-                (":time_last_used", &login.time_last_used as &ToSql),
+                (":is_overridden", is_overridden as &dyn ToSql),
+                (":server_modified", timestamp as &dyn ToSql),
+                (":http_realm", &login.http_realm as &dyn ToSql),
+                (":form_submit_url", &login.form_submit_url as &dyn ToSql),
+                (":username_field", &login.username_field as &dyn ToSql),
+                (":password_field", &login.password_field as &dyn ToSql),
+                (":password", &login.password as &dyn ToSql),
+                (":hostname", &login.hostname as &dyn ToSql),
+                (":username", &login.username as &dyn ToSql),
+                (":times_used", &login.times_used as &dyn ToSql),
+                (":time_last_used", &login.time_last_used as &dyn ToSql),
                 (
                     ":time_password_changed",
-                    &login.time_password_changed as &ToSql,
+                    &login.time_password_changed as &dyn ToSql,
                 ),
-                (":time_created", &login.time_created as &ToSql),
-                (":guid", &login.guid_str() as &ToSql),
+                (":time_created", &login.time_created as &dyn ToSql),
+                (":guid", &login.guid_str() as &dyn ToSql),
             ])?;
+            scope.err_if_interrupted()?;
         }
         Ok(())
     }
 
-    fn perform_local_updates(&self, conn: &Connection) -> Result<()> {
+    fn perform_local_updates(&self, conn: &Connection, scope: &SqlInterruptScope) -> Result<()> {
         let sql = format!(
             "
             UPDATE loginsL
@@ -230,35 +234,36 @@ impl UpdatePlan {
         for l in &self.local_updates {
             log::trace!("Updating local {:?}", l.guid_str());
             stmt.execute_named(&[
-                (":local_modified", &local_ms as &ToSql),
-                (":http_realm", &l.login.http_realm as &ToSql),
-                (":form_submit_url", &l.login.form_submit_url as &ToSql),
-                (":username_field", &l.login.username_field as &ToSql),
-                (":password_field", &l.login.password_field as &ToSql),
-                (":password", &l.login.password as &ToSql),
-                (":hostname", &l.login.hostname as &ToSql),
-                (":username", &l.login.username as &ToSql),
-                (":time_last_used", &l.login.time_last_used as &ToSql),
+                (":local_modified", &local_ms as &dyn ToSql),
+                (":http_realm", &l.login.http_realm as &dyn ToSql),
+                (":form_submit_url", &l.login.form_submit_url as &dyn ToSql),
+                (":username_field", &l.login.username_field as &dyn ToSql),
+                (":password_field", &l.login.password_field as &dyn ToSql),
+                (":password", &l.login.password as &dyn ToSql),
+                (":hostname", &l.login.hostname as &dyn ToSql),
+                (":username", &l.login.username as &dyn ToSql),
+                (":time_last_used", &l.login.time_last_used as &dyn ToSql),
                 (
                     ":time_password_changed",
-                    &l.login.time_password_changed as &ToSql,
+                    &l.login.time_password_changed as &dyn ToSql,
                 ),
-                (":times_used", &l.login.times_used as &ToSql),
-                (":guid", &l.guid_str() as &ToSql),
+                (":times_used", &l.login.times_used as &dyn ToSql),
+                (":guid", &l.guid_str() as &dyn ToSql),
             ])?;
+            scope.err_if_interrupted()?;
         }
         Ok(())
     }
 
-    pub fn execute(&self, conn: &Connection) -> Result<()> {
+    pub fn execute(&self, conn: &Connection, scope: &SqlInterruptScope) -> Result<()> {
         log::debug!("UpdatePlan: deleting records...");
-        self.perform_deletes(conn)?;
+        self.perform_deletes(conn, scope)?;
         log::debug!("UpdatePlan: Updating existing mirror records...");
-        self.perform_mirror_updates(conn)?;
+        self.perform_mirror_updates(conn, scope)?;
         log::debug!("UpdatePlan: Inserting new mirror records...");
-        self.perform_mirror_inserts(conn)?;
+        self.perform_mirror_inserts(conn, scope)?;
         log::debug!("UpdatePlan: Updating reconciled local records...");
-        self.perform_local_updates(conn)?;
+        self.perform_local_updates(conn, scope)?;
         Ok(())
     }
 }

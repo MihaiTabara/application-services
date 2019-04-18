@@ -18,7 +18,7 @@ buildscript {
         }
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:3.2.1'
+        classpath "com.android.tools.build:gradle:$properties.androidGradlePluginVersion"
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
 
         // Publish.
@@ -71,6 +71,23 @@ subprojects {
                 name = "projectBuildDir"
                 url "file://${project.buildDir}/maven"
             }
+        }
+    }
+
+    apply plugin: NativeLibsPlugin
+    nativeLibs {
+        nss {
+            lib "libplc4.*"
+            lib "libplds4.*"
+            lib "libnspr4.*"
+            lib "*freebl3.*"
+            lib "*nss3.*"
+            lib "*nssckbi.*"
+            lib "*nssutil3.*"
+            lib "*softokn3.*"
+            lib "*smime3.*"
+            // We don't need SSL so we might as well save space.
+            // lib "libssl3.*"
         }
     }
 }
@@ -180,8 +197,12 @@ if (file('local.properties').canRead()) {
 ext.nonMegazordProfile = "debug"
 
 if (System.getenv("CI")) {
+    // Note: CI can still override this (and does for PRs), this
+    // is just the default
     ext.nonMegazordProfile = "release"
-} else if (localProperties != null) {
+}
+
+if (localProperties != null) {
     String localNonMegazordProfile = localProperties.getProperty(
         "application-services.nonmegazord-profile");
     if (localNonMegazordProfile != null) {
@@ -191,15 +212,28 @@ if (System.getenv("CI")) {
 
 // The Cargo targets to invoke.  The mapping from short name to target
 // triple is defined by the `rust-android-gradle` plugin.
+// They can be overwritten in `local.properties` by the `rust.targets`
+// attribute.
 ext.rustTargets = [
-    'linux-x86-64',
-    'darwin',
-    'win32-x86-64-gnu',
     'arm',
     'arm64',
     'x86_64',
     'x86',
 ]
+
+// Generate libs for our current platform so we can run unit tests.
+switch (DefaultPlatform.RESOURCE_PREFIX) {
+    case 'darwin':
+        ext.rustTargets += 'darwin'
+        break
+    case 'linux-x86-64':
+        ext.rustTargets += 'linux-x86-64'
+        break
+    case 'win32-x86-64':
+        ext.rustTargets += 'win32-x86-64-gnu'
+        break
+}
+
 // Configure some environment variables, per toolchain, that will apply during
 // the Cargo build.  We assume that the `libs/` directory has been populated
 // before invoking Gradle (or Cargo).
@@ -210,6 +244,7 @@ ext.cargoExec = { spec, toolchain ->
     // downloaded libs.
     def libsRootDir = (System.getenv('CI') || ext.libsGitSha == null) ? rootProject.rootDir : rootProject.buildDir
 
+    spec.environment("NSS_DIR",               new File(libsRootDir, "libs/${toolchain.folder}/nss").absolutePath)
     spec.environment("OPENSSL_DIR",           new File(libsRootDir, "libs/${toolchain.folder}/openssl").absolutePath)
     spec.environment("SQLCIPHER_LIB_DIR",     new File(libsRootDir, "libs/${toolchain.folder}/sqlcipher/lib").absolutePath)
     spec.environment("SQLCIPHER_INCLUDE_DIR", new File(libsRootDir, "libs/${toolchain.folder}/sqlcipher/include").absolutePath)
@@ -218,7 +253,7 @@ ext.cargoExec = { spec, toolchain ->
 detekt {
     // The version number is duplicated, please refer to plugins block for more details
     toolVersion = "1.0.0-RC14"
-    input = files("${projectDir}/components", "${projectDir}/gradle-plugin")
+    input = files("${projectDir}/components", "${projectDir}/gradle-plugin", "buildSrc")
     filters = ".*test.*,.*/resources/.*,.*/tmp/.*,.*/build/.*"
     config = files("${projectDir}/.detekt.yml")
     failFast = false
@@ -239,12 +274,12 @@ task ktlint(type: JavaExec, group: "verification") {
     description = "Check Kotlin code style."
     classpath = configurations.ktlint
     main = "com.github.shyiko.ktlint.Main"
-    args "${projectDir}/components/**/*.kt", "${projectDir}/gradle-plugin/**/*.kt", "!**/build", "buildSrc/**/*.kt"
+    args "${projectDir}/components/**/*.kt", "${projectDir}/gradle-plugin/**/*.kt", "buildSrc/**/*.kt", "!**/build"
 }
 
 task ktlintFormat(type: JavaExec, group: "formatting") {
     description = "Fix Kotlin code style deviations."
     classpath = configurations.ktlint
     main = "com.github.shyiko.ktlint.Main"
-    args "-F", "${projectDir}/components/**/*.kt", "${projectDir}/gradle-plugin/**/*.kt"
+    args "-F", "${projectDir}/components/**/*.kt", "${projectDir}/gradle-plugin/**/*.kt", "buildSrc/**/*.kt", "!**/build"
 }

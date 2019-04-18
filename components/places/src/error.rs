@@ -2,12 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-// XXX - more copy-pasta from logins.
-
 use crate::storage::bookmarks::BookmarkRootGuid;
 use crate::types::BookmarkType;
 use dogear;
 use failure::{Backtrace, Context, Fail};
+use interrupt::Interrupted;
 use std::boxed::Box;
 use std::{self, fmt};
 
@@ -18,7 +17,7 @@ pub struct Error(Box<Context<ErrorKind>>);
 
 impl Fail for Error {
     #[inline]
-    fn cause(&self) -> Option<&Fail> {
+    fn cause(&self) -> Option<&dyn Fail> {
         self.0.cause()
     }
 
@@ -30,7 +29,7 @@ impl Fail for Error {
 
 impl fmt::Display for Error {
     #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&*self.0, f)
     }
 }
@@ -90,12 +89,9 @@ pub enum ErrorKind {
     #[fail(display = "IO error: {}", _0)]
     IoError(#[fail(cause)] std::io::Error),
 
-    // Maybe we should try to fabricate a rusqlite::Error that looks like the
-    // interrupted error?
     #[fail(display = "Operation interrupted")]
-    InterruptedError,
-    // Maybe we should try to fabricate a rusqlite::Error that looks like the
-    // interrupted error?
+    InterruptedError(#[fail(cause)] Interrupted),
+
     #[fail(display = "Tried to close connection on wrong PlacesApi instance")]
     WrongApiForClose,
 
@@ -119,6 +115,9 @@ pub enum ErrorKind {
 
     #[fail(display = "Protobuf decode error: {}", _0)]
     ProtobufDecodeError(#[fail(cause)] prost::DecodeError),
+
+    #[fail(display = "Database cannot be upgraded")]
+    DatabaseUpgradeError,
 }
 
 macro_rules! impl_from_error {
@@ -148,7 +147,8 @@ impl_from_error! {
     (Corruption, Corruption),
     (IoError, std::io::Error),
     (MergeError, dogear::Error),
-    (ProtobufDecodeError, prost::DecodeError)
+    (ProtobufDecodeError, prost::DecodeError),
+    (InterruptedError, Interrupted)
 }
 
 #[derive(Debug, Fail)]

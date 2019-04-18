@@ -52,7 +52,7 @@ impl BookmarkRecordId {
     #[inline]
     pub fn into_payload_id(self) -> String {
         self.root_payload_id()
-            .map(|p| p.into())
+            .map(Into::into)
             .unwrap_or_else(|| (self.0).0)
     }
 
@@ -104,7 +104,7 @@ impl<'de> Deserialize<'de> for BookmarkRecordId {
         impl<'de> Visitor<'de> for V {
             type Value = BookmarkRecordId;
 
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str("a bookmark record ID")
             }
 

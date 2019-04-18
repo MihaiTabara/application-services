@@ -14,7 +14,8 @@ The package is published as a release on github: https://github.com/mozilla/appl
 - Add additional dependencies, see [below](#additional-dependencies).
 
 ### Adding a carthage provided framework to Xcode
-- In general, to do this, add *XXX.framework* from *Carthage/Build/iOS* to *Link binary with Libraries* for the Xcode target, and also to the *Copy Carthage Dependencies* step
+- In general, to do this, add *XXX.framework* from *Carthage/Build/iOS* to *Link binary with Libraries* for the Xcode target
+- `MozillaAppServices.framework` is being built as a static lib; therefore, do _not_ follow the standard Carthage procedure of adding it to your `carthage copy-frameworks` script.
 
 ### Using a Circle-CI built framework
 
@@ -25,6 +26,10 @@ Rather than using a tagged release version, one can grab the build from Circle-C
 ## Additional dependencies
 
 The project has additional 3rd-party dependencies that a client must link against.
+
+### NSS
+
+- In your project, add all the .dylibs in the `../Carthage/Build/iOS/MozillaAppServices.framework` directory to both the "Embedded Binaries" and the "Linked Frameworks and Libraries" panels.
 
 ### Protobuf
 

@@ -1,8 +1,13 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
 #![allow(unknown_lints)]
-pub use communications;
-pub use config;
-pub use crypto;
-pub use push_errors;
-pub use push_ffi;
-pub use storage;
-pub use subscriber;
+#![warn(rust_2018_idioms)]
+
+pub mod communications;
+pub mod config;
+pub mod crypto;
+pub mod error;
+pub mod storage;
+pub mod subscriber;

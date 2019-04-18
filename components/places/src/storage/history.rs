@@ -10,7 +10,7 @@ use crate::hash;
 use crate::msg_types::{HistoryVisitInfo, HistoryVisitInfos};
 use crate::observation::VisitObservation;
 use crate::storage::{delete_pending_temp_tables, get_meta, put_meta};
-use crate::types::{SyncGuid, SyncStatus, Timestamp, VisitTransition};
+use crate::types::{SyncGuid, SyncStatus, Timestamp, VisitTransition, VisitTransitionSet};
 use rusqlite::types::ToSql;
 use rusqlite::Result as RusqliteResult;
 use rusqlite::{Row, NO_PARAMS};
@@ -27,7 +27,7 @@ static DELETION_HIGH_WATER_MARK_META_KEY: &str = "history_deleted_hwm";
 
 /// Returns the RowId of a new visit in moz_historyvisits, or None if no new visit was added.
 pub fn apply_observation(db: &PlacesDb, visit_ob: VisitObservation) -> Result<Option<RowId>> {
-    let tx = db.unchecked_transaction()?;
+    let tx = db.begin_transaction()?;
     let result = apply_observation_direct(db, visit_ob)?;
     tx.commit()?;
     Ok(result)
@@ -49,7 +49,7 @@ pub fn apply_observation_direct(
     };
     let mut update_change_counter = false;
     let mut update_frec = false;
-    let mut updates: Vec<(&str, &str, &ToSql)> = Vec::new();
+    let mut updates: Vec<(&str, &str, &dyn ToSql)> = Vec::new();
 
     if let Some(ref title) = visit_ob.title {
         page_info.title = crate::util::slice_up_to(title, super::TITLE_LENGTH_MAX).into();
@@ -92,7 +92,7 @@ pub fn apply_observation_direct(
     }
 
     if !updates.is_empty() {
-        let mut params: Vec<(&str, &ToSql)> = Vec::with_capacity(updates.len() + 1);
+        let mut params: Vec<(&str, &dyn ToSql)> = Vec::with_capacity(updates.len() + 1);
         let mut sets: Vec<String> = Vec::with_capacity(updates.len());
         for (col, name, val) in updates {
             sets.push(format!("{} = {}", col, name));
@@ -145,7 +145,7 @@ pub fn frecency_stale_at(db: &PlacesDb, url: &Url) -> Result<Option<Timestamp>> 
          WHERE h.url_hash = hash(:url) AND
                h.url = :url",
         &[(":url", &url.as_str())],
-        |row| -> rusqlite::Result<_> { Ok(row.get_checked::<_, Timestamp>(0)?) },
+        |row| -> rusqlite::Result<_> { Ok(row.get::<_, Timestamp>(0)?) },
         true,
     )?;
     Ok(result)
@@ -194,7 +194,7 @@ pub fn url_to_guid(db: &PlacesDb, url: &Url) -> Result<Option<SyncGuid>> {
         &[(":url", &url.clone().into_string())],
         // subtle: we explicitly need to specify rusqlite::Result or the compiler
         // struggles to work out what error type to return from try_query_row.
-        |row| -> rusqlite::Result<_> { Ok(row.get_checked::<_, SyncGuid>(0)?) },
+        |row| -> rusqlite::Result<_> { Ok(row.get::<_, SyncGuid>(0)?) },
         true,
     )?;
     Ok(result)
@@ -218,7 +218,7 @@ fn do_delete_place_by_guid(db: &PlacesDb, guid: &SyncGuid) -> Result<()> {
 
 /// Delete a place given its guid, creating a tombstone if necessary.
 pub fn delete_place_by_guid(db: &PlacesDb, guid: &SyncGuid) -> Result<()> {
-    let tx = db.unchecked_transaction()?;
+    let tx = db.begin_transaction()?;
     let result = do_delete_place_by_guid(db, guid);
     tx.commit()?;
     result
@@ -226,14 +226,14 @@ pub fn delete_place_by_guid(db: &PlacesDb, guid: &SyncGuid) -> Result<()> {
 
 /// Delete all visits in a date range.
 pub fn delete_visits_between(db: &PlacesDb, start: Timestamp, end: Timestamp) -> Result<()> {
-    let tx = db.unchecked_transaction()?;
+    let tx = db.begin_transaction()?;
     delete_visits_between_in_tx(db, start, end)?;
     tx.commit()?;
     Ok(())
 }
 
 pub fn delete_place_visit_at_time(db: &PlacesDb, place: &Url, visit: Timestamp) -> Result<()> {
-    let tx = db.unchecked_transaction()?;
+    let tx = db.begin_transaction()?;
     delete_place_visit_at_time_in_tx(db, place.as_str(), visit)?;
     tx.commit()?;
     Ok(())
@@ -245,12 +245,12 @@ pub fn prune_destructively(db: &PlacesDb) -> Result<()> {
 }
 
 pub fn wipe_local(db: &PlacesDb) -> Result<()> {
-    let tx = db.unchecked_transaction()?;
+    let tx = db.begin_transaction()?;
     wipe_local_in_tx(db, tx)?;
     Ok(())
 }
 
-fn wipe_local_in_tx(db: &PlacesDb, tx: sql_support::UncheckedTransaction) -> Result<()> {
+fn wipe_local_in_tx(db: &PlacesDb, tx: crate::db::PlacesTransaction<'_>) -> Result<()> {
     use crate::frecency::DEFAULT_FRECENCY_SETTINGS;
     db.execute_all(&[
         "DELETE FROM moz_places WHERE foreign_count == 0",
@@ -269,9 +269,7 @@ fn wipe_local_in_tx(db: &PlacesDb, tx: sql_support::UncheckedTransaction) -> Res
     ])?;
 
     let need_frecency_update =
-        db.query_rows_and_then_named("SELECT id FROM moz_places", &[], |r| {
-            r.get_checked::<_, RowId>(0)
-        })?;
+        db.query_rows_and_then_named("SELECT id FROM moz_places", &[], |r| r.get::<_, RowId>(0))?;
     // Update the frecency for any remaining items, which basically means just
     // for the bookmarks.
     for row_id in need_frecency_update {
@@ -285,7 +283,7 @@ fn wipe_local_in_tx(db: &PlacesDb, tx: sql_support::UncheckedTransaction) -> Res
 }
 
 pub fn delete_everything(db: &PlacesDb) -> Result<()> {
-    let tx = db.unchecked_transaction()?;
+    let tx = db.begin_transaction()?;
 
     // Remote visits could have a higher date than `now` if our clock is weird.
     let most_recent_known_visit_time = db
@@ -317,7 +315,7 @@ fn delete_place_visit_at_time_in_tx(db: &PlacesDb, url: &str, visit_date: Timest
            AND h.url = :url
          LIMIT 1",
         &[(":url", &url), (":visit_date", &visit_date)],
-        |row| row.get_checked::<_, RowId>(0),
+        |row| row.get::<_, RowId>(0),
         true,
     )?;
 
@@ -373,9 +371,9 @@ pub fn delete_visits_between_in_tx(db: &PlacesDb, start: Timestamp, end: Timesta
         &[(":start", &start), (":end", &end)],
         |row| -> rusqlite::Result<_> {
             Ok((
-                row.get_checked::<_, RowId>(0)?,
-                row.get_checked::<_, RowId>(1)?,
-                row.get_checked::<_, Timestamp>(2)?,
+                row.get::<_, RowId>(0)?,
+                row.get::<_, RowId>(1)?,
+                row.get::<_, Timestamp>(2)?,
             ))
         },
     )?;
@@ -439,11 +437,11 @@ struct PageToClean {
 }
 
 impl PageToClean {
-    pub fn from_row(row: &Row) -> Result<Self> {
+    pub fn from_row(row: &Row<'_>) -> Result<Self> {
         Ok(Self {
-            id: row.get_checked("id")?,
-            has_foreign: row.get_checked("has_foreign")?,
-            has_visits: row.get_checked("has_visits")?,
+            id: row.get("id")?,
+            has_foreign: row.get("has_foreign")?,
+            has_visits: row.get("has_visits")?,
         })
     }
 }
@@ -527,14 +525,14 @@ pub mod history_sync {
     }
 
     impl FetchedVisit {
-        pub fn from_row(row: &Row) -> Result<Self> {
+        pub fn from_row(row: &Row<'_>) -> Result<Self> {
             Ok(Self {
-                is_local: row.get_checked("is_local")?,
+                is_local: row.get("is_local")?,
                 visit_date: row
-                    .get_checked::<_, Option<Timestamp>>("visit_date")?
+                    .get::<_, Option<Timestamp>>("visit_date")?
                     .unwrap_or_default(),
                 visit_type: VisitTransition::from_primitive(
-                    row.get_checked::<_, Option<u8>>("visit_type")?.unwrap_or(0),
+                    row.get::<_, Option<u8>>("visit_type")?.unwrap_or(0),
                 ),
             })
         }
@@ -549,14 +547,12 @@ pub mod history_sync {
     }
 
     impl FetchedVisitPage {
-        pub fn from_row(row: &Row) -> Result<Self> {
+        pub fn from_row(row: &Row<'_>) -> Result<Self> {
             Ok(Self {
-                url: Url::parse(&row.get_checked::<_, String>("url")?)?,
-                guid: row.get_checked::<_, String>("guid")?.into(),
-                row_id: row.get_checked("id")?,
-                title: row
-                    .get_checked::<_, Option<String>>("title")?
-                    .unwrap_or_default(),
+                url: Url::parse(&row.get::<_, String>("url")?)?,
+                guid: row.get::<_, String>("guid")?.into(),
+                row_id: row.get("id")?,
+                title: row.get::<_, Option<String>>("title")?.unwrap_or_default(),
             })
         }
     }
@@ -682,7 +678,7 @@ pub mod history_sync {
                     )),
                 ),
                 &[],
-                |row| row.get_checked::<_, Timestamp>(0),
+                |row| row.get::<_, Timestamp>(0),
             )?;
 
             visits_to_skip.reserve(visits.len());
@@ -794,9 +790,7 @@ pub mod history_sync {
         let ts_rows = db.query_rows_and_then_named(
             tombstones_sql,
             &[(":max_places", &(max_places as u32))],
-            |row| -> rusqlite::Result<SyncGuid> {
-                Ok(row.get_checked::<_, String>("guid")?.into())
-            },
+            |row| -> rusqlite::Result<SyncGuid> { Ok(row.get::<_, String>("guid")?.into()) },
         )?;
         // It's unfortunatee that query_rows_and_then_named returns a Vec instead of an iterator
         // (which would be very hard to do), but as long as we have it, we might as well make use
@@ -840,8 +834,8 @@ pub mod history_sync {
                 ],
                 |row| -> RusqliteResult<_> {
                     Ok(HistoryRecordVisit {
-                        date: row.get_checked::<_, Timestamp>("date")?.into(),
-                        transition: row.get_checked::<_, u8>("transition")?,
+                        date: row.get::<_, Timestamp>("date")?.into(),
+                        transition: row.get::<_, u8>("transition")?,
                     })
                 },
             )?;
@@ -998,7 +992,7 @@ pub fn get_visited_into(
             );
             let mut stmt = db.prepare(&sql)?;
             for idx_r in stmt.query_and_then(chunk, |row| -> rusqlite::Result<_> {
-                Ok(row.get_checked::<_, i64>(0)? as usize)
+                Ok(row.get::<_, i64>(0)? as usize)
             })? {
                 let idx = idx_r?;
                 result[idx] = true;
@@ -1035,7 +1029,7 @@ pub fn get_visited_urls(
     Ok(db.query_rows_and_then_named_cached(
         &sql,
         &[(":start", &start), (":end", &end)],
-        |row| -> RusqliteResult<_> { Ok(row.get_checked::<_, String>(0)?) },
+        |row| -> RusqliteResult<_> { Ok(row.get::<_, String>(0)?) },
     )?)
 }
 
@@ -1043,15 +1037,67 @@ pub fn get_visit_infos(
     db: &PlacesDb,
     start: Timestamp,
     end: Timestamp,
+    exclude_types: VisitTransitionSet,
 ) -> Result<HistoryVisitInfos> {
+    let allowed_types = exclude_types.complement();
     let infos = db.query_rows_and_then_named_cached(
         "SELECT h.url, h.title, v.visit_date, v.visit_type
          FROM moz_places h
          JOIN moz_historyvisits v
            ON h.id = v.place_id
          WHERE v.visit_date BETWEEN :start AND :end
+           AND ((1 << visit_type) & :allowed_types) != 0
          ORDER BY v.visit_date",
-        &[(":start", &start), (":end", &end)],
+        rusqlite::named_params! {
+            ":start": start,
+            ":end": end,
+            ":allowed_types": allowed_types,
+        },
+        HistoryVisitInfo::from_row,
+    )?;
+    Ok(HistoryVisitInfos { infos })
+}
+
+pub fn get_visit_count(db: &PlacesDb, exclude_types: VisitTransitionSet) -> Result<i64> {
+    let count = if exclude_types.is_empty() {
+        db.query_one::<i64>("SELECT COUNT(*) FROM moz_historyvisits")?
+    } else {
+        let allowed_types = exclude_types.complement();
+        db.query_row_and_then_named(
+            "SELECT COUNT(*)
+             FROM moz_historyvisits
+             WHERE ((1 << visit_type) & :allowed_types) != 0",
+            rusqlite::named_params! {
+                ":allowed_types": allowed_types,
+            },
+            |r| r.get(0),
+            true,
+        )?
+    };
+    Ok(count)
+}
+
+pub fn get_visit_page(
+    db: &PlacesDb,
+    offset: i64,
+    count: i64,
+    exclude_types: VisitTransitionSet,
+) -> Result<HistoryVisitInfos> {
+    let allowed_types = exclude_types.complement();
+    let infos = db.query_rows_and_then_named_cached(
+        "SELECT h.url, h.title, v.visit_date, v.visit_type
+         FROM moz_places h
+         JOIN moz_historyvisits v
+           ON h.id = v.place_id
+         WHERE ((1 << v.visit_type) & :allowed_types) != 0
+         ORDER BY v.visit_date DESC, v.id
+         LIMIT :count
+         OFFSET :offset",
+        rusqlite::named_params! {
+            ":count": count,
+            ":offset": offset,
+            ":allowed_types": allowed_types,
+        },
         HistoryVisitInfo::from_row,
     )?;
     Ok(HistoryVisitInfos { infos })
@@ -1061,6 +1107,7 @@ pub fn get_visit_infos(
 mod tests {
     use super::history_sync::*;
     use super::*;
+    use crate::api::places_api::ConnectionType;
     use crate::history_sync::record::{HistoryRecord, HistoryRecordVisit};
     use crate::types::Timestamp;
     use pretty_assertions::assert_eq;
@@ -1070,7 +1117,7 @@ mod tests {
     fn test_get_visited_urls() {
         use std::collections::HashSet;
         use std::time::SystemTime;
-        let conn = PlacesDb::open_in_memory(None).expect("no memory db");
+        let conn = PlacesDb::open_in_memory(None, ConnectionType::ReadWrite).expect("no memory db");
         let now: Timestamp = SystemTime::now().into();
         let now_u64 = now.0;
         // (url, when, is_remote, (expected_always, expected_only_local)
@@ -1176,7 +1223,7 @@ mod tests {
         let result: Result<Option<u32>> = conn.try_query_row(
             "SELECT COUNT(*) from moz_places_tombstones;",
             &[],
-            |row| Ok(row.get_checked::<_, u32>(0)?),
+            |row| Ok(row.get::<_, u32>(0)?),
             true,
         );
         result
@@ -1187,7 +1234,7 @@ mod tests {
     #[test]
     fn test_visit_counts() -> Result<()> {
         let _ = env_logger::try_init();
-        let conn = PlacesDb::open_in_memory(None)?;
+        let conn = PlacesDb::open_in_memory(None, ConnectionType::ReadWrite)?;
         let url = Url::parse("https://www.example.com").expect("it's a valid url");
         let early_time = SystemTime::now() - Duration::new(60, 0);
         let late_time = SystemTime::now();
@@ -1276,7 +1323,7 @@ mod tests {
     #[test]
     fn test_get_visited() -> Result<()> {
         let _ = env_logger::try_init();
-        let conn = PlacesDb::open_in_memory(None)?;
+        let conn = PlacesDb::open_in_memory(None, ConnectionType::ReadWrite)?;
 
         let unicode_in_path = "http://www.example.com/tëst😀abc";
         let escaped_unicode_in_path = "http://www.example.com/t%C3%ABst%F0%9F%98%80abc";
@@ -1357,7 +1404,7 @@ mod tests {
     #[test]
     fn test_get_visited_into() {
         let _ = env_logger::try_init();
-        let conn = PlacesDb::open_in_memory(None).unwrap();
+        let conn = PlacesDb::open_in_memory(None, ConnectionType::ReadWrite).unwrap();
 
         let to_add = [
             Url::parse("https://www.example.com/1").unwrap(),
@@ -1409,7 +1456,7 @@ mod tests {
 
     #[test]
     fn test_delete_visited() {
-        let conn = PlacesDb::open_in_memory(None).expect("no memory db");
+        let conn = PlacesDb::open_in_memory(None, ConnectionType::ReadWrite).expect("no memory db");
         let late: Timestamp = SystemTime::now().into();
         let early: Timestamp = (SystemTime::now() - Duration::from_secs(30)).into();
         let url1 = Url::parse("https://www.example.com/1").unwrap();
@@ -1501,7 +1548,8 @@ mod tests {
     #[test]
     fn test_change_counter() -> Result<()> {
         let _ = env_logger::try_init();
-        let mut conn = PlacesDb::open_in_memory(None).expect("no memory db");
+        let mut conn =
+            PlacesDb::open_in_memory(None, ConnectionType::ReadWrite).expect("no memory db");
         let mut pi = get_observed_page(&mut conn, "http://example.com")?;
         // A new observation with just a title (ie, no visit) should update it.
         apply_observation(
@@ -1519,7 +1567,7 @@ mod tests {
     #[test]
     fn test_status_columns() -> Result<()> {
         let _ = env_logger::try_init();
-        let mut conn = PlacesDb::open_in_memory(None)?;
+        let mut conn = PlacesDb::open_in_memory(None, ConnectionType::ReadWrite)?;
         let _ = env_logger::try_init();
         // A page with "normal" and a change counter.
         let mut pi = get_observed_page(&mut conn, "http://example.com/1")?;
@@ -1592,7 +1640,7 @@ mod tests {
     #[test]
     fn test_tombstones() -> Result<()> {
         let _ = env_logger::try_init();
-        let db = PlacesDb::open_in_memory(None)?;
+        let db = PlacesDb::open_in_memory(None, ConnectionType::ReadWrite)?;
         let url = Url::parse("https://example.com")?;
         let obs = VisitObservation::new(url.clone())
             .with_visit_type(VisitTransition::Link)
@@ -1629,7 +1677,7 @@ mod tests {
     #[test]
     fn test_sync_reset() -> Result<()> {
         let _ = env_logger::try_init();
-        let mut conn = PlacesDb::open_in_memory(None)?;
+        let mut conn = PlacesDb::open_in_memory(None, ConnectionType::ReadWrite)?;
         let _ = env_logger::try_init();
         let mut pi = get_observed_page(&mut conn, "http://example.com")?;
         conn.execute_cached(
@@ -1659,7 +1707,8 @@ mod tests {
     #[test]
     fn test_fetch_visits() -> Result<()> {
         let _ = env_logger::try_init();
-        let mut conn = PlacesDb::open_in_memory(None).expect("no memory db");
+        let mut conn =
+            PlacesDb::open_in_memory(None, ConnectionType::ReadWrite).expect("no memory db");
         let pi = get_observed_page(&mut conn, "http://example.com/1")?;
         assert_eq!(fetch_visits(&conn, &pi.url, 0).unwrap().unwrap().1.len(), 0);
         assert_eq!(fetch_visits(&conn, &pi.url, 1).unwrap().unwrap().1.len(), 1);
@@ -1669,7 +1718,7 @@ mod tests {
     #[test]
     fn test_apply_synced_reconciliation() -> Result<()> {
         let _ = env_logger::try_init();
-        let mut conn = PlacesDb::open_in_memory(None)?;
+        let mut conn = PlacesDb::open_in_memory(None, ConnectionType::ReadWrite)?;
         let mut pi = get_observed_page(&mut conn, "http://example.com/1")?;
         assert_eq!(pi.sync_status, SyncStatus::New);
         assert_eq!(pi.sync_change_counter, 1);
@@ -1685,7 +1734,7 @@ mod tests {
     #[test]
     fn test_apply_synced_deletion_new() -> Result<()> {
         let _ = env_logger::try_init();
-        let mut conn = PlacesDb::open_in_memory(None)?;
+        let mut conn = PlacesDb::open_in_memory(None, ConnectionType::ReadWrite)?;
         let pi = get_observed_page(&mut conn, "http://example.com/1")?;
         assert_eq!(pi.sync_status, SyncStatus::New);
         apply_synced_deletion(&conn, &pi.guid)?;
@@ -1700,7 +1749,7 @@ mod tests {
     #[test]
     fn test_apply_synced_deletion_normal() -> Result<()> {
         let _ = env_logger::try_init();
-        let mut conn = PlacesDb::open_in_memory(None)?;
+        let mut conn = PlacesDb::open_in_memory(None, ConnectionType::ReadWrite)?;
         let pi = get_observed_page(&mut conn, "http://example.com/1")?;
         assert_eq!(pi.sync_status, SyncStatus::New);
         conn.execute_cached(
@@ -1727,12 +1776,7 @@ mod tests {
             .query_rows_and_then_named(
                 "SELECT place_id, visit_date FROM moz_historyvisit_tombstones",
                 &[],
-                |row| -> Result<_> {
-                    Ok((
-                        row.get_checked::<_, RowId>(0)?,
-                        row.get_checked::<_, Timestamp>(1)?,
-                    ))
-                },
+                |row| -> Result<_> { Ok((row.get::<_, RowId>(0)?, row.get::<_, Timestamp>(1)?)) },
             )
             .unwrap();
         tombstones.sort();
@@ -1743,7 +1787,7 @@ mod tests {
     fn test_visit_tombstones() {
         use url::Url;
         let _ = env_logger::try_init();
-        let mut conn = PlacesDb::open_in_memory(None).unwrap();
+        let mut conn = PlacesDb::open_in_memory(None, ConnectionType::ReadWrite).unwrap();
         let now = Timestamp::now();
 
         let urls = &[
@@ -1853,7 +1897,7 @@ mod tests {
         };
         use url::Url;
         let _ = env_logger::try_init();
-        let mut conn = PlacesDb::open_in_memory(None).unwrap();
+        let mut conn = PlacesDb::open_in_memory(None, ConnectionType::ReadWrite).unwrap();
         let ts = Timestamp::now().0 - 5_000_000;
         // Add a number of visits across a handful of origins.
         for o in 0..10 {
@@ -1973,7 +2017,7 @@ mod tests {
     fn test_delete_everything() {
         use url::Url;
         let _ = env_logger::try_init();
-        let mut conn = PlacesDb::open_in_memory(None).unwrap();
+        let mut conn = PlacesDb::open_in_memory(None, ConnectionType::ReadWrite).unwrap();
         let start = Timestamp::now();
 
         let urls = &[
@@ -2068,7 +2112,7 @@ mod tests {
     #[test]
     fn test_long_strings() {
         let _ = env_logger::try_init();
-        let conn = PlacesDb::open_in_memory(None).unwrap();
+        let conn = PlacesDb::open_in_memory(None, ConnectionType::ReadWrite).unwrap();
         let mut url = "http://www.example.com".to_string();
         while url.len() < crate::storage::URL_LENGTH_MAX {
             url += "/garbage";
@@ -2100,7 +2144,7 @@ mod tests {
             .query_row_and_then_named(
                 "SELECT title FROM moz_places WHERE id = :id",
                 &[(":id", &maybe_row.unwrap())],
-                |row| row.get_checked(0),
+                |row| row.get(0),
                 false,
             )
             .unwrap();
