@@ -277,7 +277,7 @@ class BeetmoverTask(Task):
     with_upstream_artifact = chaining(append_to_attr, "upstream_artifacts")
 
     def build_worker_payload(self):
-        return {
+        payload =  {
             "maxRunTime": 10 * 60,
             "releaseProperties": {
                 "appName": self.app_name,
@@ -286,6 +286,14 @@ class BeetmoverTask(Task):
             "version": self.app_version,
             "artifact_id": self.artifact_id,
         }
+
+        # XXX: Beetmover jobs that transfer the `forUnitTests` maven.zip need
+        # to have an additional flag set
+        if 'forUnitTests' in self.name:
+            payload['is_jar'] = True
+
+        return payload
+
 
 class DockerWorkerTask(Task):
     """
