@@ -133,8 +133,8 @@ tasks:
                 description: Schedules the build and test tasks for Application Services.
         "tasks_for == 'github-release'":
           $let:
-            #TODO: mobile-beetmover-v1
-            beetmover_worker_type: mobile-beetmover-dev
+            #TODO: appsv-beetmover-v1
+            beetmover_worker_type: appsv-beetmover-dev
             #TODO: maven-production
             beetmover_bucket: maven-staging
             #TODO: https://maven.mozilla.org/
