@@ -10,7 +10,7 @@ TARGET_ARCHS=("x86_64" "x86" "arm64" "arm")
 # The directories required for the Android-Gradle plugin and APK
 # layout, like `jniLibs/x86` or `lib/x86` respectively.
 TARGET_ARCHS_DISTS=("x86_64" "x86" "arm64-v8a" "armeabi-v7a")
-# The corresponding Rust target names.
+# The corresponding Rust target names
 TARGET_ARCHS_TOOLCHAINS=("x86_64-linux-android" "i686-linux-android" "aarch64-linux-android" "arm-linux-androideabi")
 
 # End of configuration.
