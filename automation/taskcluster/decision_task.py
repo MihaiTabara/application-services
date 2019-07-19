@@ -297,7 +297,7 @@ def dockerfile_path(name):
 def linux_task(name):
     task = (
         DockerWorkerTask(name)
-        .with_worker_type("application-services-r")
+        .with_worker_type(os.environ.get("BUILD_WORKER_TYPE"))
     )
     if os.environ["TASK_FOR"] == "github-release":
         task.with_features("chainOfTrust")

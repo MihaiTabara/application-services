@@ -55,6 +55,7 @@ class Config:
         # Set in the decision task’s payload, such as defined in .taskcluster.yml
         self.task_owner = os.environ.get("TASK_OWNER")
         self.task_source = os.environ.get("TASK_SOURCE")
+        self.build_worker_type = os.environ.get("BUILD_WORKER_TYPE")
         self.git_url = os.environ.get("APPSERVICES_HEAD_REPOSITORY")
         self.git_ref = os.environ.get("APPSERVICES_HEAD_BRANCH")
         self.git_sha = os.environ.get("APPSERVICES_HEAD_REV")
