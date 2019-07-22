@@ -470,7 +470,7 @@ class DockerWorkerTask(Task):
 
         image_build_task = (
             DockerWorkerTask("Docker image: " + image_name)
-            .with_worker_type(CONFIG.images_worker_type or self.worker_type)
+            .with_worker_type(CONFIG.images_worker_type)
             .with_max_run_time_minutes(30)
             .with_index_and_artifacts_expire_in(CONFIG.docker_images_expire_in)
             .with_features("dind")
