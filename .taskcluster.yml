@@ -51,8 +51,8 @@ tasks:
         else: app-services-1-decision
       build_worker_type:
         $if: 'is_repo_trusted'
-        then: app-services-3-b
-        else: app-services-1-b
+        then: app-services-3-b-linux
+        else: app-services-1-b-linux
       # TODO: revisit once bug 1533314 is done to possibly infer better priorities
       tasks_priority: highest
     in:
